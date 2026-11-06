@@ -257,10 +257,26 @@ function _M.ensure_namespace(doc, node, prefix, href)
         return by_href
     end
 
+    local namespaces = {}
+    local current = node
+    while current ~= nil and current.type == XML_ELEMENT_NODE do
+        local ns = current.nsDef
+        while ns ~= nil do
+            if ns.prefix ~= nil then
+                local ns_prefix = ffi.string(ns.prefix)
+                if namespaces[ns_prefix] == nil then
+                    namespaces[ns_prefix] = ns
+                end
+            end
+            ns = ns.next
+        end
+        current = current.parent
+    end
+
     local suffix = 0
     while true do
         local candidate = suffix == 0 and prefix or prefix .. suffix
-        local existing = C.xmlSearchNs(doc, node, xml_char(candidate))
+        local existing = namespaces[candidate]
         if existing == nil then
             return C.xmlNewNs(node, xml_char(href), xml_char(candidate))
         end
