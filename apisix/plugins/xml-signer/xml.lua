@@ -36,7 +36,7 @@ extern xmlFreeFunc xmlFree;
 ]]
 
 -- FFI types are process-wide, including types loaded by other XML plugins.
-if not pcall(ffi.sizeof, "struct _xmlNs") then
+if not ffi.sizeof("struct _xmlNs") then
     ffi.cdef[[
 struct _xmlNs {
     xmlNsPtr next;
@@ -49,7 +49,7 @@ struct _xmlNs {
 ]]
 end
 
-if not pcall(ffi.sizeof, "struct _xmlAttr") then
+if not ffi.sizeof("struct _xmlAttr") then
     ffi.cdef[[
 struct _xmlAttr {
     void *_private;
@@ -68,7 +68,7 @@ struct _xmlAttr {
 ]]
 end
 
-if not pcall(ffi.sizeof, "struct _xmlNode") then
+if not ffi.sizeof("struct _xmlNode") then
     ffi.cdef[[
 struct _xmlNode {
     void *_private;
