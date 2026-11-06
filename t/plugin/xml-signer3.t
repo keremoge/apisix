@@ -349,3 +349,55 @@ routes: []
 GET /t
 --- response_body
 defaults verified
+
+
+
+=== TEST 4: keep the Plugin loadable and reject requests when libxml2 is missing
+--- apisix_yaml
+routes: []
+#END
+--- config
+    location /t {
+        content_by_lua_block {
+            local modules = {
+                "apisix.plugins.xml-signer",
+                "apisix.plugins.xml-signer.signer",
+                "apisix.plugins.xml-signer.xml",
+            }
+            local saved = {}
+            for _, name in ipairs(modules) do
+                saved[name] = package.loaded[name]
+                package.loaded[name] = nil
+            end
+            -- simulate an image without libxml2
+            package.preload["apisix.plugins.xml-signer.xml"] = function()
+                error("libxml2 is not available, install the libxml2 package "
+                      .. "(for example `apt-get install -y libxml2`): "
+                      .. "libxml2.so.2: cannot open shared object file", 0)
+            end
+
+            local ok, err = pcall(function()
+                local plugin = require("apisix.plugins.xml-signer")
+                local status, body = plugin.rewrite({
+                    credentials = {certificate = "unused", private_key = "unused"},
+                }, {})
+                ngx.say(status, " ", body.message)
+            end)
+
+            package.preload["apisix.plugins.xml-signer.xml"] = nil
+            for _, name in ipairs(modules) do
+                package.loaded[name] = saved[name]
+            end
+            assert(ok, err)
+        }
+    }
+--- request
+POST /t
+<order xmlns="urn:test"><id>42</id></order>
+--- more_headers
+Content-Type: application/xml
+--- response_body
+500 signing_error
+--- error_log
+xml-signer is unavailable and will reject requests: libxml2 is not available
+xml-signer rejected request: signing_error: libxml2 is not available
