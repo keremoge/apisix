@@ -38,13 +38,13 @@ enveloped-signature transform.
 
 The Plugin supports RSA-SHA256 for normal use and RSA-SHA1 for interoperability
 with legacy systems. It uses exclusive XML canonicalization without comments.
-By default, it includes the configured X.509 certificate in `ds:KeyInfo`; this
-element can be omitted when the verifier obtains the certificate out of band.
+By default, it includes the configured X.509 certificate in `ds:KeyInfo`.
+You can omit this element when the verifier obtains the certificate out of band.
 
 Do not combine this Plugin with another request-signing Plugin on the same
-Route. Documents that already contain an XML signature are rejected.
+Route. The Plugin rejects documents that already contain an XML signature.
 
-## How it works
+## How It Works
 
 For a matching request, the Plugin performs the following operations during the
 rewrite phase:
@@ -61,12 +61,13 @@ rewrite phase:
 9. Replaces the upstream request body, updates `Content-Length`, and removes
    body-digest headers that no longer describe the signed body.
 
-The body is serialized as UTF-8 after signing. Insignificant formatting such as
-indentation or quote style can therefore differ from the original request.
-Requests with an explicit non-UTF-8 `charset` are rejected.
-Compressed request bodies must be decoded before signing, for example with
-the `request-decompress` Plugin. A remaining Content-Encoding other than
-`identity` is rejected.
+The Plugin serializes the body as UTF-8 after signing. Insignificant formatting
+such as indentation or quote style can therefore differ from the original
+request. The Plugin rejects requests with an explicit non-UTF-8 `charset`.
+
+Decode compressed request bodies before signing, for example with the
+[`request-decompress`](request-decompress.md) Plugin. The signing Plugin
+rejects a remaining Content-Encoding other than `identity`.
 
 The generated signature has the following structure:
 
@@ -119,13 +120,13 @@ The generated signature has the following structure:
 | `request.max_body_bytes` | integer | False | `5242880` | Maximum request body size in bytes. Valid range: 1024 to 67108864. |
 
 NOTE: The schema declares `encrypt_fields = {"credentials.private_key"}`.
-A directly configured private key is encrypted in etcd only when
-`apisix.data_encryption.enable_encrypt_fields` is enabled and a valid keyring
-is configured. This does not encrypt standalone YAML configuration. Using
-[APISIX Secret](../terminology/secret.md) references is recommended so key
-material is not stored in Route configuration.
+APISIX encrypts a directly configured private key in etcd only when you enable
+`apisix.data_encryption.enable_encrypt_fields` and configure a valid keyring.
+This does not encrypt standalone YAML configuration. Use
+[APISIX Secret](../terminology/secret.md) references to keep key material out of
+Route configuration.
 
-### Signature algorithms
+### Signature Algorithms
 
 | Value | SignatureMethod URI | DigestMethod URI | Usage |
 | --- | --- | --- | --- |
@@ -134,15 +135,15 @@ material is not stored in Route configuration.
 
 :::warning
 
-SHA-1 is cryptographically weak and should only be enabled when a legacy
-upstream cannot validate RSA-SHA256 signatures. APISIX logs a warning whenever
+SHA-1 is cryptographically weak. Enable it only when a legacy upstream cannot
+validate RSA-SHA256 signatures. APISIX logs a warning whenever
 it signs a request with `rsa-sha1`. Use compensating controls such as TLS,
 restricted network access, short credential rotation intervals, and a migration
 plan to RSA-SHA256.
 
 :::
 
-## Configure credentials
+## Configure Credentials
 
 You can configure PEM values directly, but Secret references keep private key
 material out of Route configuration. The reference format is:
@@ -151,8 +152,8 @@ material out of Route configuration. The reference format is:
 $secret://<manager>/<configuration-id>/<key-path>
 ```
 
-For example, after creating an APISIX Vault Secret resource named `signing`, a
-certificate and key can be referenced as follows:
+For example, after creating an APISIX Vault Secret resource named `signing`,
+you can reference a certificate and key as follows:
 
 ```json
 {
@@ -168,7 +169,7 @@ cached per worker using a fingerprint of the resolved values. When the Secret
 cache returns rotated PEM values, the Plugin parses and uses the new key pair
 without requiring an APISIX worker restart.
 
-### Use environment variables
+### Use Environment Variables
 
 Without an external secret manager, such as on Kubernetes, expose the PEM
 values as environment variables and reference them with `$env://<NAME>`.
@@ -252,8 +253,8 @@ No other configuration changes are required. Both `SignatureMethod` and
 
 Set `signature.key_info` to `none` when the upstream verifier already has the
 signing certificate and requires a signature without `ds:KeyInfo`. The Plugin
-still requires both credentials: the private key signs the document and the
-certificate is used to validate that the configured key pair matches.
+still requires both credentials: it uses the private key to sign the document
+and the certificate to validate that the configured key pair matches.
 
 The following Admin API request creates a Route that emits no `ds:KeyInfo`:
 
@@ -286,7 +287,7 @@ document digest, but contains no `ds:KeyInfo` or embedded certificate. The
 upstream must select the trusted verification certificate through its own
 configuration.
 
-## Example usage
+## Example Usage
 
 Send an XML request:
 
@@ -300,7 +301,7 @@ The upstream receives the body with one enveloped `ds:Signature` under the
 document root. Requests whose method is not listed in `request.methods` pass
 through unchanged.
 
-## Error responses
+## Error Responses
 
 | HTTP status | Message | Cause |
 | --- | --- | --- |
@@ -312,7 +313,7 @@ through unchanged.
 | `500` | `credential_error` | A Secret could not be resolved, PEM parsing failed, the key is not RSA, or the certificate and key do not match. |
 | `500` | `signing_error` | Canonicalization, digest generation, signing, or serialization failed. |
 
-Detailed cryptographic and request content is not returned to clients.
+The Plugin does not return detailed cryptographic or request content to clients.
 
 ## Limitations
 
