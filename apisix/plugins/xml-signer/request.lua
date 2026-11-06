@@ -114,7 +114,14 @@ function _M.rewrite(plugin_name, conf, ctx, sign)
         return 415, {message = "unsupported_media_type"}
     end
     local content_type = normalized_content_type(content_type_header)
-    if not contains(conf.request.content_types, content_type) then
+    local accepted = false
+    for _, configured_type in ipairs(conf.request.content_types) do
+        if configured_type:lower() == content_type then
+            accepted = true
+            break
+        end
+    end
+    if not accepted then
         return 415, {message = "unsupported_media_type"}
     end
     if has_unsupported_charset(content_type_header) then
