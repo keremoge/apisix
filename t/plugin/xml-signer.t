@@ -95,17 +95,21 @@ routes: []
 
             local certificate_pem = read("t/certs/server.crt")
             local signed = assert(signer.sign(
-                '<?before-signing preserve?>'
-                .. '<root xmlns="urn:test"><value>42</value></root>'
+                '<?xml version="1.0" encoding="ISO-8859-1"?>'
+                .. '<?before-signing preserve?>'
+                .. '<root xmlns="urn:test"><value>42 \195\169</value></root>'
                 .. '<?after-signing preserve?>',
                 {credentials = {
                     certificate = certificate_pem,
                     private_key = read("t/certs/server.key"),
-                }}
+                }},
+                "UTF-8"
             ))
 
             local doc = assert(xml.parse(signed))
             local root = assert(xml.root(doc))
+            local value = assert(xml.find_child(root, "urn:test", "value"))
+            assert(xml.content(value) == "42 \195\169")
             local signature = assert(xml.find_all(
                 root, signer.namespaces.ds, "Signature")[1])
             local signed_info = assert(xml.find_child(

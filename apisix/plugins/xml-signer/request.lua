@@ -52,12 +52,13 @@ end
 
 local function has_unsupported_charset(value)
     if not value then
-        return false
+        return false, nil
     end
 
     local parameter_start
     local quoted = false
     local escaped = false
+    local validated_charset
 
     for index = 1, #value + 1 do
         local char = value:sub(index, index)
@@ -75,6 +76,7 @@ local function has_unsupported_charset(value)
                     if charset ~= "utf-8" and charset ~= "utf8" then
                         return true
                     end
+                    validated_charset = "UTF-8"
                 end
             end
             parameter_start = index + 1
@@ -88,7 +90,7 @@ local function has_unsupported_charset(value)
             escaped = false
         end
     end
-    return false
+    return false, validated_charset
 end
 
 
@@ -124,7 +126,8 @@ function _M.rewrite(plugin_name, conf, ctx, sign)
     if not accepted then
         return 415, {message = "unsupported_media_type"}
     end
-    if has_unsupported_charset(content_type_header) then
+    local unsupported_charset, charset = has_unsupported_charset(content_type_header)
+    if unsupported_charset then
         return 415, {message = "unsupported_media_type"}
     end
 
@@ -149,7 +152,7 @@ function _M.rewrite(plugin_name, conf, ctx, sign)
         return 400, {message = "empty_body"}
     end
 
-    local signed, code, detail = sign(body, conf)
+    local signed, code, detail = sign(body, conf, charset)
     if not signed then
         core.log.error(plugin_name, " rejected request: ", code, ": ", detail)
         local internal_error = not code or code == "credential_error" or code == "signing_error"

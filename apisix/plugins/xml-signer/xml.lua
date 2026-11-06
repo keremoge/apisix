@@ -153,7 +153,7 @@ local function copy_and_free(value)
 end
 
 
-function _M.parse(value)
+function _M.parse(value, encoding)
     if type(value) ~= "string" or value == "" then
         return nil, "XML body is empty"
     end
@@ -161,7 +161,7 @@ function _M.parse(value)
     local XML_PARSE_NOERROR = 32
     local XML_PARSE_NOWARNING = 64
     local options = XML_PARSE_NONET + XML_PARSE_NOERROR + XML_PARSE_NOWARNING
-    local doc = C.xmlReadMemory(value, #value, "document.xml", nil, options)
+    local doc = C.xmlReadMemory(value, #value, "document.xml", encoding, options)
     if doc == nil then
         return nil, "failed to parse XML"
     end

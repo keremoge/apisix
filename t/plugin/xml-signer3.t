@@ -90,8 +90,10 @@ routes: []
             local ok, err = pcall(function()
                 local ctx = {}
                 local sign_calls = 0
-                local function sign(value)
+                local sign_charset
+                local function sign(value, _, charset)
                     sign_calls = sign_calls + 1
+                    sign_charset = charset
                     return value .. "-signed"
                 end
                 local conf = {
@@ -105,6 +107,7 @@ routes: []
 
                 assert(request.rewrite("xml-signer", conf, ctx, sign) == nil)
                 assert(sign_calls == 1)
+                assert(sign_charset == "UTF-8")
                 assert(rewritten_body == "<root/>-signed")
                 assert(ctx["Content-Length"] == tostring(#rewritten_body))
                 assert(cleared_headers["Transfer-Encoding"])
@@ -223,6 +226,7 @@ routes: []
 
                 assert(request.rewrite("xml-signer", conf, {}, sign) == nil)
                 assert(sign_calls == 2)
+                assert(sign_charset == nil)
             end)
 
             ngx.req.get_method = original.get_method

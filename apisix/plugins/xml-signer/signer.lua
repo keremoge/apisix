@@ -76,7 +76,7 @@ local function build_signature(doc, root, runtime, algorithm, key_info_mode,
 end
 
 
-function _M.sign(body, conf)
+function _M.sign(body, conf, encoding)
     local algorithm_name = conf.signature and conf.signature.algorithm or "rsa-sha256"
     local algorithm = algorithms.get(algorithm_name)
     if not algorithm then
@@ -87,7 +87,7 @@ function _M.sign(body, conf)
         return nil, "signing_error", "unsupported KeyInfo mode"
     end
 
-    local doc, parse_err = xml.parse(body)
+    local doc, parse_err = xml.parse(body, encoding)
     if not doc then
         return nil, "invalid_xml", parse_err
     end
