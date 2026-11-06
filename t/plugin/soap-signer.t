@@ -612,3 +612,82 @@ routes: []
 GET /t
 --- response_body
 invalid_soap: multiple wsse:Security headers target the ultimate receiver
+
+
+
+=== TEST 10: preserve payload namespace bindings when adding security namespaces
+--- apisix_yaml
+routes: []
+#END
+--- config
+    location /t {
+        content_by_lua_block {
+            local signer = require("apisix.plugins.soap-signer.signer")
+            local xml = require("apisix.plugins.soap-signer.xml")
+            local ns = signer.namespaces
+
+            local function read(path)
+                local file = assert(io.open(path, "rb"))
+                local value = file:read("*a")
+                file:close()
+                return value
+            end
+
+            local signed = assert(signer.sign([[
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"
+ xmlns:wsse="]] .. ns.wsse .. [[" xmlns:wsu="]] .. ns.wsu .. [["
+ xmlns:ds="]] .. ns.ds .. [[">
+ <s:Header xmlns:wsse="urn:header-payload">
+  <wsse:HeaderPayload/>
+  <wsse1:Security xmlns:wsse1="]] .. ns.wsse .. [["
+   xmlns:wsse="urn:security-payload" xmlns:wsu="urn:security-payload"
+   xmlns:ds="urn:security-payload"><wsse:SecurityPayload/></wsse1:Security>
+ </s:Header>
+ <s:Body xmlns:wsu="urn:body-payload"><wsu:BodyPayload/></s:Body>
+</s:Envelope>]], {
+                credentials = {
+                    certificate = read("t/certs/server.crt"),
+                    private_key = read("t/certs/server.key"),
+                },
+                soap = {version = "auto", must_understand = true},
+                timestamp = {ttl_seconds = 300},
+            }, 1790856000))
+
+            local doc = assert(xml.parse(signed))
+            local root = assert(xml.root(doc))
+            local body = assert(xml.find_child(root, ns.soap11, "Body"))
+            local security = assert(xml.find_all(root, ns.wsse, "Security")[1])
+            assert(xml.get_namespaced_property(body, ns.wsu, "Id"))
+            assert(#xml.find_all(body, "urn:body-payload", "BodyPayload") == 1)
+            assert(#xml.find_all(root, "urn:header-payload", "HeaderPayload") == 1)
+            assert(#xml.find_all(root, "urn:security-payload", "SecurityPayload") == 1)
+            assert(#xml.find_all(security, ns.wsu, "Timestamp") == 1)
+            assert(#xml.find_all(root, ns.ds, "Signature") == 1)
+            xml.free_document(doc)
+
+            signed = assert(signer.sign([[
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"
+ xmlns:wsse="]] .. ns.wsse .. [[">
+ <s:Header xmlns:wsse="urn:header-payload"><wsse:HeaderPayload/></s:Header>
+ <s:Body><Ping/></s:Body>
+</s:Envelope>]], {
+                credentials = {
+                    certificate = read("t/certs/server.crt"),
+                    private_key = read("t/certs/server.key"),
+                },
+                soap = {version = "auto", must_understand = true},
+                timestamp = {ttl_seconds = 300},
+            }, 1790856000))
+            doc = assert(xml.parse(signed))
+            root = assert(xml.root(doc))
+            assert(#xml.find_all(root, ns.wsse, "Security") == 1)
+            assert(#xml.find_all(root, "urn:header-payload", "HeaderPayload") == 1)
+            assert(#xml.find_all(root, ns.ds, "Signature") == 1)
+            xml.free_document(doc)
+            ngx.say("namespace bindings verified")
+        }
+    }
+--- request
+GET /t
+--- response_body
+namespace bindings verified

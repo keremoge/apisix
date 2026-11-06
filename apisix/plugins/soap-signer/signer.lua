@@ -130,11 +130,20 @@ end
 
 
 local function ensure_namespaces(envelope)
+    if not envelope.security then
+        envelope.header_wsse_ns = xml.ensure_namespace(
+            envelope.doc, envelope.header, "wsse", WSSE)
+        envelope.security = xml.new_child(
+            envelope.header, envelope.header_wsse_ns, "Security")
+    end
+
     envelope.soap_ns = xml.ensure_namespace(
-        envelope.doc, envelope.root, "soapenv", envelope.soap_namespace)
-    envelope.wsse_ns = xml.ensure_namespace(envelope.doc, envelope.root, "wsse", WSSE)
-    envelope.wsu_ns = xml.ensure_namespace(envelope.doc, envelope.root, "wsu", WSU)
-    envelope.ds_ns = xml.ensure_namespace(envelope.doc, envelope.root, "ds", DS)
+        envelope.doc, envelope.security, "soapenv", envelope.soap_namespace)
+    envelope.wsse_ns = xml.ensure_namespace(
+        envelope.doc, envelope.security, "wsse", WSSE)
+    envelope.wsu_ns = xml.ensure_namespace(envelope.doc, envelope.security, "wsu", WSU)
+    envelope.body_wsu_ns = xml.ensure_namespace(envelope.doc, envelope.body, "wsu", WSU)
+    envelope.ds_ns = xml.ensure_namespace(envelope.doc, envelope.security, "ds", DS)
 end
 
 
@@ -353,12 +362,9 @@ function _M.sign(body, conf, now)
     end
 
     ensure_namespaces(envelope)
-    if not envelope.security then
-        envelope.security = xml.new_child(envelope.header, envelope.wsse_ns, "Security")
-    end
     set_must_understand(envelope, conf.soap.must_understand)
 
-    local body_id, body_id_err = ensure_id(envelope.body, envelope.wsu_ns, "Body")
+    local body_id, body_id_err = ensure_id(envelope.body, envelope.body_wsu_ns, "Body")
     if not body_id then
         xml.free_document(doc)
         return nil, "signing_error", body_id_err

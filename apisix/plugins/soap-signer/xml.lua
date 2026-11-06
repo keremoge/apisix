@@ -262,7 +262,11 @@ end
 function _M.ensure_namespace(doc, node, prefix, href)
     local by_href = C.xmlSearchNsByHref(doc, node, xml_char(href))
     if by_href ~= nil and by_href.prefix ~= nil then
-        return by_href
+        local existing = C.xmlSearchNs(doc, node, by_href.prefix)
+        if existing ~= nil and existing.href ~= nil
+           and ffi.string(existing.href) == href then
+            return existing
+        end
     end
 
     local suffix = 0
