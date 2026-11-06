@@ -36,6 +36,12 @@ description: xml-signer 插件为 XML 请求体添加 enveloped XML 数字签名
 
 不要在同一个路由中将本插件与其他请求签名插件组合使用。本插件会拒绝已经包含 XML 签名的文档。
 
+:::caution
+
+插件会使用配置的私钥为到达它的每个格式正确的 XML 文档签名。因此，任何能够向该路由发送请求的客户端都可以获得由你的私钥生成的签名。请在路由上启用认证插件（例如 [`key-auth`](key-auth.md) 或 [`jwt-auth`](jwt-auth.md)），确保只有可信客户端能够访问本插件。认证插件会在 `xml-signer` 之前执行。
+
+:::
+
 ## 工作原理
 
 匹配的请求在 rewrite 阶段会依次执行以下操作：
@@ -83,7 +89,7 @@ description: xml-signer 插件为 XML 请求体添加 enveloped XML 数字签名
 ## 要求
 
 - APISIX 必须运行在 Linux 上，并且系统中提供 `libxml2.so.2`。APISIX Debian 镜像已包含此库。
-- 证书和私钥必须为 PEM 编码，使用 RSA，并且属于同一密钥对。
+- 证书和私钥必须为 PEM 编码，使用长度至少为 2048 位的 RSA 密钥，并且属于同一密钥对。
 - 上游验证方必须支持 exclusive XML canonicalization。
 - 请将插件配置在所有其他请求体修改插件之后。此插件之后对请求体的任何修改都会使签名失效。
 
@@ -99,7 +105,7 @@ description: xml-signer 插件为 XML 请求体添加 enveloped XML 数字签名
 | `signature.key_info` | string | 否 | `x509_data` | 签名中包含的密钥信息。使用 `x509_data` 嵌入证书，或使用 `none` 省略 `ds:KeyInfo`。 |
 | `request.methods` | array[string] | 否 | `["POST"]` | 要签名的请求方法。其他方法的请求保持不变并直接转发。 |
 | `request.content_types` | array[string] | 否 | `["application/xml", "text/xml"]` | 接受的媒体类型；会忽略其他参数，但会拒绝显式声明非 UTF-8 `charset` 的请求。 |
-| `request.max_body_bytes` | integer | 否 | `5242880` | 请求体最大字节数，有效范围为 1024 到 67108864。 |
+| `request.max_body_bytes` | integer | 否 | `5242880` | 请求体最大字节数，有效范围为 1024 到 67108864。插件不会将限制提高到非零的 `nginx_config.http.client_max_body_size` 或路由上 `client-control` 配置的 `max_body_size` 之上，以较小值为准。 |
 
 注意：schema 中定义了 `encrypt_fields = {"credentials.private_key"}`。只有启用 `apisix.data_encryption.enable_encrypt_fields` 并配置有效的 keyring 时，直接配置的私钥才会在 etcd 中加密；独立模式的 YAML 配置不会被加密。建议使用 [APISIX Secret](../terminology/secret.md) 引用，避免密钥材料保存在路由配置中。
 
@@ -224,9 +230,9 @@ curl http://127.0.0.1:9080/signed-xml \
 | `400` | `empty_body` | 被选中的请求没有请求体。 |
 | `400` | `invalid_xml` | XML 解析失败、文档没有根元素，或存在 DTD/实体声明。 |
 | `400` | `already_signed` | 文档已包含 `ds:Signature`。 |
-| `413` | `body_too_large` | 请求体超过 `request.max_body_bytes`。 |
+| `413` | `body_too_large` | 请求体超过生效的请求体大小限制（参见 `request.max_body_bytes`）。 |
 | `415` | `unsupported_media_type` | Content-Type 缺失、重复、未列入 `request.content_types` 或声明了非 UTF-8 字符集；或者 Content-Encoding 重复或不是 `identity`。 |
-| `500` | `credential_error` | Secret 解析失败、PEM 解析失败、密钥不是 RSA，或证书与私钥不匹配。 |
+| `500` | `credential_error` | Secret 解析失败、PEM 解析失败、密钥不是 RSA 或短于 2048 位，或证书与私钥不匹配。 |
 | `500` | `signing_error` | canonicalization、摘要生成、签名或序列化失败。 |
 
 不会向客户端返回详细的密码学信息或请求内容。
@@ -241,7 +247,7 @@ curl http://127.0.0.1:9080/signed-xml \
 ## 故障排查
 
 - 如果上游报告摘要不匹配，请确认没有优先级低于 `xml-signer` 的插件在其后修改请求体。
-- 如果 APISIX 返回 `credential_error`，请检查 Secret URI、PEM 边界、RSA 密钥类型以及证书与私钥是否匹配。
+- 如果 APISIX 返回 `credential_error`，请检查 Secret URI、PEM 边界、RSA 密钥类型和长度（至少 2048 位）以及证书与私钥是否匹配。
 - 如果旧版验证方拒绝签名，请将其要求的算法 URI 与上表比较，并确认它支持 exclusive C14N。
 - 如果请求返回 `415`，请在 `request.content_types` 中加入 XML 媒体类型，或修正客户端的 Content-Type 标头。
 

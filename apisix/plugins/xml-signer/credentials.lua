@@ -23,6 +23,9 @@ local x509 = require("resty.openssl.x509")
 local tostring = tostring
 local type = type
 
+-- RSA keys shorter than 2048 bits are considered insecure (NIST SP 800-131A).
+local MIN_RSA_KEY_BITS = 2048
+
 
 local credential_cache = core.lrucache.new({
     ttl = 300,
@@ -52,6 +55,12 @@ local function parse_credentials(certificate_pem, private_key_pem)
     local key_type = private_key:get_key_type()
     if not key_type or key_type.sn ~= "rsaEncryption" then
         return nil, "private key must be RSA"
+    end
+    -- get_size() returns the maximum signature size in bytes, which is the
+    -- RSA modulus length.
+    local key_size = private_key:get_size()
+    if not key_size or key_size * 8 < MIN_RSA_KEY_BITS then
+        return nil, "RSA private key must be at least " .. MIN_RSA_KEY_BITS .. " bits"
     end
 
     local certificate, certificate_err = x509.new(certificate_pem, "PEM")

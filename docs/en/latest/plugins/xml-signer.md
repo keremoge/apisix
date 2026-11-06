@@ -44,6 +44,17 @@ You can omit this element when the verifier obtains the certificate out of band.
 Do not combine this Plugin with another request-signing Plugin on the same
 Route. The Plugin rejects documents that already contain an XML signature.
 
+:::caution
+
+The Plugin signs every well-formed XML document that reaches it with the
+configured private key. Anyone who can send requests to the Route can therefore
+obtain signatures from your key. Enable an authentication Plugin, such as
+[`key-auth`](key-auth.md) or [`jwt-auth`](jwt-auth.md), on the Route so that
+only trusted clients can reach the Plugin. Authentication Plugins run before
+`xml-signer`.
+
+:::
+
 ## How It Works
 
 For a matching request, the Plugin performs the following operations during the
@@ -101,8 +112,8 @@ The generated signature has the following structure:
   images include this library.
 - APISIX-Runtime must be built to enforce `request.max_body_bytes` while NGINX
   reads the request body.
-- The certificate and private key must be PEM encoded, use RSA, and form a
-  matching key pair.
+- The certificate and private key must be PEM encoded, use RSA with a key of
+  at least 2048 bits, and form a matching key pair.
 - The upstream verifier must support exclusive XML canonicalization.
 - Configure the Plugin after any other Plugin that modifies the request body.
   Any later body modification invalidates the signature.
@@ -119,7 +130,7 @@ The generated signature has the following structure:
 | `signature.key_info` | string | False | `x509_data` | Key information included in the signature. Use `x509_data` to embed the certificate or `none` to omit `ds:KeyInfo`. |
 | `request.methods` | array[string] | False | `["POST"]` | Request methods to sign. Other methods pass through unchanged. |
 | `request.content_types` | array[string] | False | `["application/xml", "text/xml"]` | Accepted media types. Parameters are ignored except that an explicit non-UTF-8 `charset` is rejected. |
-| `request.max_body_bytes` | integer | False | `5242880` | Maximum request body size in bytes. Valid range: 1024 to 67108864. |
+| `request.max_body_bytes` | integer | False | `5242880` | Maximum request body size in bytes. Valid range: 1024 to 67108864. The Plugin never raises the limit above a non-zero `nginx_config.http.client_max_body_size` or a `client-control` `max_body_size` configured on the Route; the smaller value applies. |
 
 NOTE: The schema declares `encrypt_fields = {"credentials.private_key"}`.
 APISIX encrypts a directly configured private key in etcd only when you enable
@@ -310,9 +321,9 @@ through unchanged.
 | `400` | `empty_body` | The selected request has no body. |
 | `400` | `invalid_xml` | XML parsing failed, the document has no root, or a DTD/entity declaration is present. |
 | `400` | `already_signed` | The document already contains a `ds:Signature`. |
-| `413` | `body_too_large` | The body exceeds `request.max_body_bytes`. |
+| `413` | `body_too_large` | The body exceeds the effective body size limit (see `request.max_body_bytes`). |
 | `415` | `unsupported_media_type` | Content-Type is missing, repeated, not listed in `request.content_types`, or declares a non-UTF-8 charset; or Content-Encoding is repeated or is not `identity`. |
-| `500` | `credential_error` | A Secret could not be resolved, PEM parsing failed, the key is not RSA, or the certificate and key do not match. |
+| `500` | `credential_error` | A Secret could not be resolved, PEM parsing failed, the key is not RSA or is shorter than 2048 bits, or the certificate and key do not match. |
 | `500` | `signing_error` | Canonicalization, digest generation, signing, or serialization failed. |
 
 The Plugin does not return detailed cryptographic or request content to clients.
@@ -333,7 +344,8 @@ The Plugin does not return detailed cryptographic or request content to clients.
 - If the upstream reports a digest mismatch, confirm no Plugin with a lower
   priority changes the body after `xml-signer`.
 - If APISIX returns `credential_error`, verify the Secret URI, PEM boundaries,
-  RSA key type, and certificate/private-key match.
+  RSA key type and size (at least 2048 bits), and certificate/private-key
+  match.
 - If a legacy verifier rejects the signature, compare its required algorithm
   URIs with the table above and confirm it supports exclusive C14N.
 - If requests return `415`, include the XML media type in

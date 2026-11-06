@@ -402,3 +402,35 @@ routes: []
 GET /t
 --- response_body
 independent canonical form verified
+
+
+
+=== TEST 8: reject RSA keys shorter than 2048 bits
+--- apisix_yaml
+routes: []
+#END
+--- config
+    location /t {
+        content_by_lua_block {
+            local credentials = require("apisix.plugins.xml-signer.credentials")
+
+            local function read(path)
+                local file = assert(io.open(path, "rb"))
+                local value = file:read("*a")
+                file:close()
+                return value
+            end
+
+            local runtime, err = credentials.load({
+                certificate = read("t/certs/server_1024.crt"),
+                private_key = read("t/certs/server_1024.key"),
+            })
+            ngx.say(runtime == nil)
+            ngx.say(err)
+        }
+    }
+--- request
+GET /t
+--- response_body
+true
+RSA private key must be at least 2048 bits
