@@ -109,8 +109,13 @@ The generated security header has this general structure:
 
 ## Requirements
 
-- APISIX must run on Linux with `libxml2.so.2` available. The APISIX Debian
-  images include this library.
+- APISIX must run on Linux with `libxml2.so.2` available. The released APISIX
+  Debian, Ubuntu, and Red Hat images include this library. Images built from
+  source, for example with `debian-dev/Dockerfile.local` from
+  [apisix-docker](https://github.com/apache/apisix-docker), do not; install it
+  in the final image, for example with `apt-get install -y libxml2`. Without
+  the library, APISIX logs `soap-signer is unavailable and will reject
+  requests` at startup and the Plugin returns `500 signing_error`.
 - APISIX-Runtime must be built to enforce `request.max_body_bytes` while NGINX
   reads the request body.
 - The certificate and private key must be PEM encoded, use RSA, and form a
@@ -350,7 +355,7 @@ unchanged.
 | `413` | `body_too_large` | The body exceeds the effective body size limit (see `request.max_body_bytes`). |
 | `415` | `unsupported_media_type` | Content-Type is missing, repeated, not listed in `request.content_types`, or declares a non-UTF-8 charset; or Content-Encoding is repeated or is not `identity`. |
 | `500` | `credential_error` | A Secret could not be resolved, PEM parsing failed, the key is not RSA or is shorter than the minimum size for `signature.algorithm`, or the certificate and key do not match. |
-| `500` | `signing_error` | ID generation, canonicalization, digest generation, signing, or serialization failed. |
+| `500` | `signing_error` | libxml2 is not available, or ID generation, canonicalization, digest generation, signing, or serialization failed. |
 
 The Plugin does not return detailed cryptographic or request content to clients.
 
@@ -367,6 +372,9 @@ The Plugin does not return detailed cryptographic or request content to clients.
 
 ## Troubleshooting
 
+- If APISIX logs `soap-signer is unavailable and will reject requests:
+  libxml2 is not available` and requests return `500 signing_error`, install
+  `libxml2` in the APISIX image or host and restart APISIX.
 - If the service reports a digest mismatch, confirm no lower-priority Plugin or
   upstream proxy modifies the Body, Timestamp, namespace declarations, or IDs.
 - If APISIX returns `not_soap`, compare `soap.version` with the Envelope

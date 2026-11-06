@@ -16,9 +16,22 @@
 --
 local core = require("apisix.core")
 local request = require("apisix.plugins.soap-signer.request")
-local signer = require("apisix.plugins.soap-signer.signer")
 
 local plugin_name = "soap-signer"
+
+-- The signer depends on libxml2 through the FFI. If the library is missing,
+-- keep the Plugin loadable so that the rest of APISIX starts, report the
+-- problem once at load time, and reject every signing request with 500.
+local signer_ok, signer = pcall(require, "apisix.plugins.soap-signer.signer")
+if not signer_ok then
+    local load_err = signer
+    core.log.error(plugin_name, " is unavailable and will reject requests: ", load_err)
+    signer = {
+        sign = function()
+            return nil, "signing_error", load_err
+        end,
+    }
+end
 
 local schema = {
     type = "object",

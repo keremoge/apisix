@@ -200,7 +200,13 @@ void xmlDocDumpMemoryEnc(xmlDocPtr out_doc, xmlChar **doc_txt_ptr,
 
 local loaded, C = pcall(ffi.load, "xml2")
 if not loaded then
-    C = ffi.load("libxml2.so.2")
+    local lib
+    loaded, lib = pcall(ffi.load, "libxml2.so.2")
+    if not loaded then
+        error("libxml2 is not available, install the libxml2 package "
+              .. "(for example `apt-get install -y libxml2`): " .. tostring(lib), 0)
+    end
+    C = lib
 end
 C.xmlInitParser()
 

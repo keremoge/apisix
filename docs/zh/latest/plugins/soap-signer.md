@@ -86,7 +86,7 @@ description: soap-signer 插件使用 X.509 WS-Security 签名为 SOAP 请求体
 
 ## 要求
 
-- APISIX 必须运行在 Linux 上，并且系统中提供 `libxml2.so.2`。APISIX Debian 镜像已包含此库。
+- APISIX 必须运行在 Linux 上，并且系统中提供 `libxml2.so.2`。已发布的 APISIX Debian、Ubuntu 和 Red Hat 镜像已包含此库。从源码构建的镜像（例如使用 [apisix-docker](https://github.com/apache/apisix-docker) 中的 `debian-dev/Dockerfile.local`）不包含此库，请在最终镜像中安装，例如执行 `apt-get install -y libxml2`。缺少此库时，APISIX 会在启动时记录 `soap-signer is unavailable and will reject requests`，插件会返回 `500 signing_error`。
 - APISIX-Runtime 必须支持在 NGINX 读取请求体时强制执行 `request.max_body_bytes`。
 - 证书和私钥必须为 PEM 编码，使用 RSA，并且属于同一密钥对。`rsa-sha256` 要求 RSA 密钥至少为 2048 位，`rsa-sha1` 要求至少为 1024 位。
 - SOAP 服务必须支持 X.509 BinarySecurityToken 直接引用和 exclusive XML canonicalization。
@@ -257,7 +257,7 @@ curl http://127.0.0.1:9080/signed-soap \
 | `413` | `body_too_large` | 请求体超过生效的请求体大小限制（参见 `request.max_body_bytes`）。 |
 | `415` | `unsupported_media_type` | Content-Type 缺失、重复、未列入 `request.content_types` 或声明了非 UTF-8 字符集；或者 Content-Encoding 重复或不是 `identity`。 |
 | `500` | `credential_error` | Secret 解析失败、PEM 解析失败、密钥不是 RSA 或短于 `signature.algorithm` 要求的最小长度，或证书与私钥不匹配。 |
-| `500` | `signing_error` | ID 生成、canonicalization、摘要生成、签名或序列化失败。 |
+| `500` | `signing_error` | libxml2 不可用，或 ID 生成、canonicalization、摘要生成、签名或序列化失败。 |
 
 不会向客户端返回详细的密码学信息或请求内容。
 
@@ -270,6 +270,7 @@ curl http://127.0.0.1:9080/signed-soap \
 
 ## 故障排查
 
+- 如果 APISIX 记录 `soap-signer is unavailable and will reject requests: libxml2 is not available`，并且请求返回 `500 signing_error`，请在 APISIX 镜像或主机中安装 `libxml2` 并重启 APISIX。
 - 如果服务报告摘要不匹配，请确认没有优先级更低的插件或上游代理修改 Body、Timestamp、命名空间声明或 ID。
 - 如果 APISIX 返回 `not_soap`，请根据 Envelope 命名空间检查 `soap.version`，不要只依赖 Content-Type。
 - 如果 APISIX 返回 `credential_error`，请检查 Secret URI、PEM 边界、RSA 密钥类型和长度（`rsa-sha256` 至少 2048 位，`rsa-sha1` 至少 1024 位）以及证书与私钥是否匹配。
