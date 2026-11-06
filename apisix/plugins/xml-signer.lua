@@ -16,7 +16,15 @@
 --
 local core = require("apisix.core")
 local request = require("apisix.plugins.xml-signer.request")
-local signer = require("apisix.plugins.xml-signer.signer")
+local signer_ok, signer = pcall(require, "apisix.plugins.xml-signer.signer")
+if not signer_ok then
+    local load_err = signer
+    signer = {
+        sign = function()
+            return nil, "signing_error", load_err
+        end,
+    }
+end
 
 local plugin_name = "xml-signer"
 
