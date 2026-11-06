@@ -126,3 +126,112 @@ GET /t
 soap-signer rejected request: invalid_soap
 soap-signer failed to read request body: request size 16385 is greater than the maximum size 16384 allowed
 soap-signer failed to read request body: nil
+
+
+
+=== TEST 2: enforce the body limit while reading and never raise the operator limit
+--- extra_yaml_config
+nginx_config:
+  http:
+    client_max_body_size: 8k
+--- config
+    location /upstream {
+        content_by_lua_block {
+            ngx.say("upstream reached")
+        }
+    }
+    location /t {
+        content_by_lua_block {
+            local t = require("lib.test_admin")
+            local core = require("apisix.core")
+            local http = require("resty.http")
+
+            local function read(path)
+                local file = assert(io.open(path, "rb"))
+                local value = file:read("*a")
+                file:close()
+                return value
+            end
+
+            local code = t.test('/apisix/admin/routes/1',
+                ngx.HTTP_PUT,
+                core.json.encode({
+                    uri = "/soap",
+                    plugins = {
+                        ["proxy-rewrite"] = {uri = "/upstream"},
+                        ["soap-signer"] = {
+                            credentials = {
+                                certificate = read("t/certs/server.crt"),
+                                private_key = read("t/certs/server.key"),
+                            },
+                            request = {max_body_bytes = 16384},
+                        },
+                    },
+                    upstream = {
+                        type = "roundrobin",
+                        nodes = {["127.0.0.1:" .. ngx.var.server_port] = 1},
+                    },
+                })
+            )
+            if code >= 300 then
+                ngx.status = code
+                return
+            end
+            ngx.sleep(0.5)
+
+            local prefix = '<s:Envelope xmlns:s="'
+                .. 'http://schemas.xmlsoap.org/soap/envelope/"><s:Body><p>'
+            local suffix = '</p></s:Body></s:Envelope>'
+            local function envelope(size)
+                local value = prefix .. string.rep("x", size - #prefix - #suffix)
+                              .. suffix
+                assert(#value == size)
+                return value
+            end
+
+            -- the global 8k limit applies although max_body_bytes is 16k
+            for _, size in ipairs({8192, 8193}) do
+                local res = assert(http.new():request_uri(
+                    "http://127.0.0.1:" .. ngx.var.server_port .. "/soap",
+                    {method = "POST", body = envelope(size),
+                     headers = {["Content-Type"] = "text/xml"}}))
+                if res.status == 200 then
+                    ngx.print(res.status, " ", res.body)
+                else
+                    ngx.say(res.status, " ", core.json.decode(res.body).message)
+                end
+            end
+
+            -- a chunked body without Content-Length is cut off while NGINX
+            -- reads it; lua-resty-http sends a function body as-is, so the
+            -- iterator produces the chunked transfer coding itself
+            local chunks = 64
+            local done = false
+            local res = assert(http.new():request_uri(
+                "http://127.0.0.1:" .. ngx.var.server_port .. "/soap",
+                {method = "POST",
+                 body = function()
+                     if done then
+                         return nil
+                     end
+                     if chunks == 0 then
+                         done = true
+                         return "0\r\n\r\n"
+                     end
+                     chunks = chunks - 1
+                     return string.format("%x\r\n%s\r\n", 4096, string.rep("x", 4096))
+                 end,
+                 headers = {["Content-Type"] = "text/xml",
+                            ["Transfer-Encoding"] = "chunked"}}))
+            ngx.say(res.status)
+        }
+    }
+--- request
+GET /t
+--- response_body
+200 upstream reached
+413 body_too_large
+413
+--- error_log
+soap-signer failed to read request body: request size 8193 is greater than the maximum size 8192 allowed
+client intended to send too large chunked body

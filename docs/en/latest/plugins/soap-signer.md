@@ -43,6 +43,17 @@ the verifier obtains the certificate out of band.
 Do not combine this Plugin with another request-signing Plugin on the same
 Route. The Plugin rejects messages that already contain an XML signature.
 
+:::caution
+
+The Plugin signs every well-formed SOAP message that reaches it with the
+configured private key. Anyone who can send requests to the Route can therefore
+obtain signatures from your key. Enable an authentication Plugin, such as
+[`key-auth`](key-auth.md) or [`jwt-auth`](jwt-auth.md), on the Route so that
+only trusted clients can reach the Plugin. Authentication Plugins run before
+`soap-signer`.
+
+:::
+
 ## How It Works
 
 For a matching request, the Plugin performs the following operations during the
@@ -100,8 +111,11 @@ The generated security header has this general structure:
 
 - APISIX must run on Linux with `libxml2.so.2` available. The APISIX Debian
   images include this library.
+- APISIX-Runtime must be built to enforce `request.max_body_bytes` while NGINX
+  reads the request body.
 - The certificate and private key must be PEM encoded, use RSA, and form a
-  matching key pair.
+  matching key pair. The RSA key must be at least 2048 bits for `rsa-sha256`
+  and at least 1024 bits for `rsa-sha1`.
 - The SOAP service must support X.509 BinarySecurityToken direct references
   and exclusive XML canonicalization.
 - Configure the Plugin after any other Plugin that modifies the SOAP body or
@@ -122,7 +136,7 @@ The generated security header has this general structure:
 | `timestamp.ttl_seconds` | integer | False | `300` | Timestamp lifetime. Valid range: 1 to 86400 seconds. |
 | `request.methods` | array[string] | False | `["POST"]` | Request methods to sign. Other methods pass through unchanged. |
 | `request.content_types` | array[string] | False | `["text/xml", "application/soap+xml", "application/xml"]` | Accepted media types. An explicit non-UTF-8 `charset` is rejected. |
-| `request.max_body_bytes` | integer | False | `5242880` | Maximum request body size in bytes. Valid range: 1024 to 67108864. |
+| `request.max_body_bytes` | integer | False | `5242880` | Maximum request body size in bytes. Valid range: 1024 to 67108864. The Plugin never raises the limit above a non-zero `nginx_config.http.client_max_body_size` or a `client-control` `max_body_size` configured on the Route; the smaller value applies. |
 
 NOTE: The schema declares `encrypt_fields = {"credentials.private_key"}`.
 APISIX encrypts a directly configured private key in etcd only when you enable
@@ -133,10 +147,10 @@ Route configuration.
 
 ### Signature Algorithms
 
-| Value | SignatureMethod URI | DigestMethod URI | Usage |
-| --- | --- | --- | --- |
-| `rsa-sha256` | `http://www.w3.org/2001/04/xmldsig-more#rsa-sha256` | `http://www.w3.org/2001/04/xmlenc#sha256` | Default and recommended. |
-| `rsa-sha1` | `http://www.w3.org/2000/09/xmldsig#rsa-sha1` | `http://www.w3.org/2000/09/xmldsig#sha1` | Legacy WS-Security compatibility only. |
+| Value | SignatureMethod URI | DigestMethod URI | Minimum RSA key size | Usage |
+| --- | --- | --- | --- | --- |
+| `rsa-sha256` | `http://www.w3.org/2001/04/xmldsig-more#rsa-sha256` | `http://www.w3.org/2001/04/xmlenc#sha256` | 2048 bits | Default and recommended. |
+| `rsa-sha1` | `http://www.w3.org/2000/09/xmldsig#rsa-sha1` | `http://www.w3.org/2000/09/xmldsig#sha1` | 1024 bits | Legacy WS-Security compatibility only. Accepts 1024-bit keys still used by some legacy systems. |
 
 :::warning
 
@@ -333,9 +347,9 @@ unchanged.
 | `400` | `invalid_soap` | XML parsing failed, Body is absent or duplicated, Header is duplicated or follows the Body, recognized XML ID values (`wsu:Id`, `xml:id`, and unqualified `Id`) are invalid or duplicated, the `wsse:Security` header already contains a `wsu:Timestamp`, or a DTD/entity declaration is present. |
 | `400` | `not_soap` | The root is not a supported SOAP Envelope or does not match `soap.version`. |
 | `400` | `already_signed` | The message already contains a `ds:Signature`. |
-| `413` | `body_too_large` | The body exceeds `request.max_body_bytes`. |
+| `413` | `body_too_large` | The body exceeds the effective body size limit (see `request.max_body_bytes`). |
 | `415` | `unsupported_media_type` | Content-Type is missing, repeated, not listed in `request.content_types`, or declares a non-UTF-8 charset; or Content-Encoding is repeated or is not `identity`. |
-| `500` | `credential_error` | A Secret could not be resolved, PEM parsing failed, the key is not RSA, or the certificate and key do not match. |
+| `500` | `credential_error` | A Secret could not be resolved, PEM parsing failed, the key is not RSA or is shorter than the minimum size for `signature.algorithm`, or the certificate and key do not match. |
 | `500` | `signing_error` | ID generation, canonicalization, digest generation, signing, or serialization failed. |
 
 The Plugin does not return detailed cryptographic or request content to clients.
@@ -358,7 +372,8 @@ The Plugin does not return detailed cryptographic or request content to clients.
 - If APISIX returns `not_soap`, compare `soap.version` with the Envelope
   namespace rather than relying only on Content-Type.
 - If APISIX returns `credential_error`, verify the Secret URI, PEM boundaries,
-  RSA key type, and certificate/private-key match.
+  RSA key type and size (2048 bits for `rsa-sha256`, 1024 bits for
+  `rsa-sha1`), and certificate/private-key match.
 - If a legacy service rejects RSA-SHA256, compare its expected algorithm URIs
   with the table above before enabling `rsa-sha1`.
 - If the service rejects `mustUnderstand`, verify whether it expects SOAP 1.1

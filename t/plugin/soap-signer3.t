@@ -37,7 +37,7 @@ routes: []
             local original = {
                 get_method = ngx.req.get_method,
                 set_body_data = ngx.req.set_body_data,
-                headers = core.request.headers,
+                get_headers = ngx.req.get_headers,
                 get_body = core.request.get_body,
                 set_header = core.request.set_header,
             }
@@ -56,11 +56,17 @@ routes: []
             ngx.req.set_body_data = function(value)
                 rewritten_body = value
             end
-            core.request.headers = function()
-                return {
-                    ["content-type"] = content_type,
-                    ["content-encoding"] = content_encoding,
-                }
+            -- the Plugin must read every header; more than the default
+            -- limit of 100 must not hide Content-Type or Content-Encoding
+            ngx.req.get_headers = function(max_headers)
+                assert(max_headers == 0)
+                local headers = {}
+                for i = 1, 101 do
+                    headers["x-test-header-" .. i] = "value"
+                end
+                headers["content-type"] = content_type
+                headers["content-encoding"] = content_encoding
+                return headers
             end
             core.request.get_body = function()
                 return body, body_err, body_err_code
@@ -203,7 +209,7 @@ routes: []
 
             ngx.req.get_method = original.get_method
             ngx.req.set_body_data = original.set_body_data
-            core.request.headers = original.headers
+            ngx.req.get_headers = original.get_headers
             core.request.get_body = original.get_body
             core.request.set_header = original.set_header
             assert(ok, err)
@@ -431,3 +437,30 @@ routes: []
 GET /t
 --- response_body
 defaults verified
+
+
+
+=== TEST 5: parse many documents without exhausting FFI callback slots
+--- apisix_yaml
+routes: []
+#END
+--- config
+    location /t {
+        content_by_lua_block {
+            local xml = require("apisix.plugins.soap-signer.xml")
+            -- LuaJIT has a fixed number of FFI callback slots; creating one
+            -- per parse fails after about a thousand requests, and calling
+            -- back into Lua from a compiled trace raises "bad callback"
+            for _ = 1, 5000 do
+                local doc = assert(xml.parse("<root/>"))
+                xml.free_document(doc)
+                local bad, err = xml.parse('<root><p:undeclared/></root>')
+                assert(bad == nil and err == "failed to parse XML")
+            end
+            ngx.say("parsed")
+        }
+    }
+--- request
+GET /t
+--- response_body
+parsed

@@ -15,6 +15,7 @@
 -- limitations under the License.
 --
 local ffi = require("ffi")
+local jit = require("jit")
 
 local type = type
 
@@ -29,6 +30,23 @@ typedef struct _xmlError xmlError;
 typedef xmlError *xmlErrorPtr;
 typedef void (*xmlStructuredErrorFunc)(void *userData, xmlErrorPtr error);
 typedef struct _xmlSAXHandler xmlSAXHandler;
+typedef struct _xmlNode xmlNode;
+typedef xmlNode *xmlNodePtr;
+typedef struct _xmlNs xmlNs;
+typedef xmlNs *xmlNsPtr;
+typedef struct _xmlAttr xmlAttr;
+typedef xmlAttr *xmlAttrPtr;
+typedef struct _xmlNodeSet xmlNodeSet;
+typedef xmlNodeSet *xmlNodeSetPtr;
+typedef void (*xmlFreeFunc)(void *mem);
+extern xmlFreeFunc xmlFree;
+]]
+
+-- FFI types are process-wide: struct bodies must only be declared once, or
+-- reloading this module (for example on a plugin hot reload) fails with
+-- "attempt to redefine".
+if ffi.sizeof("struct _xmlSAXHandler") == nil then
+    ffi.cdef[[
 struct _xmlSAXHandler {
     void *internalSubset;
     void *isStandalone;
@@ -63,22 +81,17 @@ struct _xmlSAXHandler {
     void *endElementNs;
     xmlStructuredErrorFunc serror;
 };
+]]
+end
+
+if ffi.sizeof("struct _xmlParserCtxt") == nil then
+    ffi.cdef[[
 struct _xmlParserCtxt {
     xmlSAXHandler *sax;
 };
-typedef struct _xmlNode xmlNode;
-typedef xmlNode *xmlNodePtr;
-typedef struct _xmlNs xmlNs;
-typedef xmlNs *xmlNsPtr;
-typedef struct _xmlAttr xmlAttr;
-typedef xmlAttr *xmlAttrPtr;
-typedef struct _xmlNodeSet xmlNodeSet;
-typedef xmlNodeSet *xmlNodeSetPtr;
-typedef void (*xmlFreeFunc)(void *mem);
-extern xmlFreeFunc xmlFree;
 ]]
+end
 
--- FFI types are process-wide, including types loaded by other XML plugins.
 if ffi.sizeof("struct _xmlNs") == nil then
     ffi.cdef[[
 struct _xmlNs {
@@ -223,6 +236,32 @@ local function copy_and_free(value)
 end
 
 
+-- libxml2 reports recoverable errors, such as undeclared namespace prefixes,
+-- through the structured error handler while still returning a document.
+-- LuaJIT has a fixed number of FFI callback slots, so the handler is created
+-- once per module load instead of once per request. Parsing is synchronous,
+-- so a module-level flag is safe within a worker.
+local parse_failed = false
+local structured_error = ffi.cast("xmlStructuredErrorFunc", function(_, error)
+    if error ~= nil and error.level >= XML_ERR_ERROR then
+        parse_failed = true
+    end
+end)
+
+
+local function read_memory(ctxt, value)
+    parse_failed = false
+    ctxt.sax.serror = structured_error
+    local doc = C.xmlCtxtReadMemory(
+        ctxt, value, #value, "document.xml", nil,
+        XML_PARSE_NONET + XML_PARSE_NOERROR + XML_PARSE_NOWARNING)
+    return doc, parse_failed
+end
+-- A C function that calls back into Lua must not be called from a
+-- JIT-compiled trace, otherwise LuaJIT raises "bad callback".
+jit.off(read_memory)
+
+
 function _M.parse(value)
     if type(value) ~= "string" or value == "" then
         return nil, "XML body is empty"
@@ -233,16 +272,7 @@ function _M.parse(value)
         return nil, "failed to create XML parser context"
     end
 
-    local has_error = false
-    local structured_error = ffi.cast("xmlStructuredErrorFunc", function(_, error)
-        if error ~= nil and error.level >= XML_ERR_ERROR then
-            has_error = true
-        end
-    end)
-    ctxt.sax.serror = structured_error
-    local doc = C.xmlCtxtReadMemory(
-        ctxt, value, #value, "document.xml", nil,
-        XML_PARSE_NONET + XML_PARSE_NOERROR + XML_PARSE_NOWARNING)
+    local doc, has_error = read_memory(ctxt, value)
     C.xmlFreeParserCtxt(ctxt)
     if doc == nil or has_error then
         if doc ~= nil then

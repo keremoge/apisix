@@ -15,9 +15,11 @@
 -- limitations under the License.
 --
 local core = require("apisix.core")
+local runtime_ok, apisix_ngx_client = pcall(require, "resty.apisix.client")
 
 local ipairs = ipairs
 local ngx = ngx
+local tonumber = tonumber
 local tostring = tostring
 local type = type
 
@@ -29,6 +31,62 @@ local BODY_DIGEST_HEADERS = {
     "Content-Digest",
     "Repr-Digest",
 }
+
+local SIZE_UNITS = {
+    [""] = 1,
+    k = 1024,
+    m = 1024 * 1024,
+    g = 1024 * 1024 * 1024,
+}
+
+local global_body_limit
+
+
+-- Parse an NGINX size value such as 0, "8192", "512k" or "1m".
+local function parse_nginx_size(value)
+    if type(value) == "number" then
+        return value
+    end
+    if type(value) ~= "string" then
+        return nil
+    end
+    local number, unit = value:match("^%s*(%d+)%s*([kKmMgG]?)%s*$")
+    if not number then
+        return nil
+    end
+    return tonumber(number) * SIZE_UNITS[unit:lower()]
+end
+
+
+-- The operator-configured `nginx_config.http.client_max_body_size`.
+-- `set_client_max_body_size` overrides it for the current request, so the
+-- Plugin must not raise the limit above what the operator configured.
+local function get_global_body_limit()
+    if global_body_limit == nil then
+        local local_conf = core.config.local_conf()
+        local http_conf = local_conf and local_conf.nginx_config
+                          and local_conf.nginx_config.http
+        global_body_limit = http_conf
+                            and parse_nginx_size(http_conf.client_max_body_size)
+                            or 0
+    end
+    return global_body_limit
+end
+
+
+local function effective_body_limit(ctx, configured)
+    local limit = configured
+    -- client-control sets a Route-specific limit that takes precedence over
+    -- the global one.
+    local outer_limit = ctx and ctx.client_max_body_size
+    if outer_limit == nil then
+        outer_limit = get_global_body_limit()
+    end
+    if outer_limit and outer_limit > 0 and outer_limit < limit then
+        limit = outer_limit
+    end
+    return limit
+end
 
 
 local function contains(values, expected)
@@ -112,7 +170,10 @@ function _M.rewrite(plugin_name, conf, ctx, sign)
         return
     end
 
-    local headers = core.request.headers(ctx)
+    -- Read every header: core.request.headers() stops after
+    -- `max_req_headers` (100 by default), which would let a client hide a
+    -- Content-Encoding or a repeated Content-Type behind padding headers.
+    local headers = ngx.req.get_headers(0)
     local content_encoding = headers["content-encoding"]
     if content_encoding ~= nil
        and (type(content_encoding) ~= "string"
@@ -131,16 +192,31 @@ function _M.rewrite(plugin_name, conf, ctx, sign)
         return 415, {message = "unsupported_media_type"}
     end
 
-    local body, body_err, body_err_code = core.request.get_body(
-        conf.request.max_body_bytes, ctx)
+    if not runtime_ok then
+        core.log.error(plugin_name, " requires APISIX-Runtime to limit request body size")
+        return 501, {message = "internal_error"}
+    end
+    -- Enforce the limit while NGINX reads the body, so that a chunked request
+    -- without Content-Length cannot upload an unbounded body.
+    local max_body_bytes = effective_body_limit(ctx, conf.request.max_body_bytes)
+    local limit_ok, limit_err = apisix_ngx_client.set_client_max_body_size(
+        max_body_bytes)
+    if not limit_ok then
+        core.log.error(plugin_name, " failed to set client max body size: ", limit_err)
+        return 503, {message = "internal_error"}
+    end
+
+    local body, body_err, body_err_code = core.request.get_body(max_body_bytes, ctx)
     if not body then
-        core.log.error(plugin_name, " failed to read request body: ", body_err)
         if not body_err then
+            core.log.warn(plugin_name, " failed to read request body: ", body_err)
             return 400, {message = "empty_body"}
         end
         if body_err_code == "too_large" then
+            core.log.warn(plugin_name, " failed to read request body: ", body_err)
             return 413, {message = "body_too_large"}
         end
+        core.log.error(plugin_name, " failed to read request body: ", body_err)
         return 500, {message = "internal_error"}
     end
 
@@ -154,8 +230,11 @@ function _M.rewrite(plugin_name, conf, ctx, sign)
 
     local signed, code, detail = sign(body, conf)
     if not signed then
-        core.log.error(plugin_name, " rejected request: ", code, ": ", detail)
         local internal_error = not code or code == "credential_error" or code == "signing_error"
+        -- Client-caused rejections are logged at warn level so that malformed
+        -- requests cannot flood the error log.
+        local log = internal_error and core.log.error or core.log.warn
+        log(plugin_name, " rejected request: ", code, ": ", detail)
         local status = internal_error and 500 or 400
         return status, {message = code or "internal_error"}
     end

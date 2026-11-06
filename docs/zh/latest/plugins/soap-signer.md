@@ -36,6 +36,12 @@ description: soap-signer 插件使用 X.509 WS-Security 签名为 SOAP 请求体
 
 不要在同一个路由中将本插件与其他请求签名插件组合使用。本插件会拒绝已经包含 XML 签名的消息。
 
+:::caution
+
+插件会使用配置的私钥为到达它的每个格式正确的 SOAP 消息签名。因此，任何能够向该路由发送请求的客户端都可以获得由你的私钥生成的签名。请在路由上启用认证插件（例如 [`key-auth`](key-auth.md) 或 [`jwt-auth`](jwt-auth.md)），确保只有可信客户端能够访问本插件。认证插件会在 `soap-signer` 之前执行。
+
+:::
+
 ## 工作原理
 
 匹配的请求在 rewrite 阶段会依次执行以下操作：
@@ -81,7 +87,8 @@ description: soap-signer 插件使用 X.509 WS-Security 签名为 SOAP 请求体
 ## 要求
 
 - APISIX 必须运行在 Linux 上，并且系统中提供 `libxml2.so.2`。APISIX Debian 镜像已包含此库。
-- 证书和私钥必须为 PEM 编码，使用 RSA，并且属于同一密钥对。
+- APISIX-Runtime 必须支持在 NGINX 读取请求体时强制执行 `request.max_body_bytes`。
+- 证书和私钥必须为 PEM 编码，使用 RSA，并且属于同一密钥对。`rsa-sha256` 要求 RSA 密钥至少为 2048 位，`rsa-sha1` 要求至少为 1024 位。
 - SOAP 服务必须支持 X.509 BinarySecurityToken 直接引用和 exclusive XML canonicalization。
 - 请将插件配置在所有其他修改 SOAP Body 或已签名标头的插件之后。此插件之后的任何修改都会使签名失效。
 
@@ -100,16 +107,16 @@ description: soap-signer 插件使用 X.509 WS-Security 签名为 SOAP 请求体
 | `timestamp.ttl_seconds` | integer | 否 | `300` | Timestamp 有效期，有效范围为 1 到 86400 秒。 |
 | `request.methods` | array[string] | 否 | `["POST"]` | 要签名的请求方法。其他方法的请求保持不变并直接转发。 |
 | `request.content_types` | array[string] | 否 | `["text/xml", "application/soap+xml", "application/xml"]` | 接受的媒体类型；显式声明非 UTF-8 `charset` 的请求会被拒绝。 |
-| `request.max_body_bytes` | integer | 否 | `5242880` | 请求体最大字节数，有效范围为 1024 到 67108864。 |
+| `request.max_body_bytes` | integer | 否 | `5242880` | 请求体最大字节数，有效范围为 1024 到 67108864。插件不会将限制提高到非零的 `nginx_config.http.client_max_body_size` 或路由上 `client-control` 配置的 `max_body_size` 之上，以较小值为准。 |
 
 注意：schema 中定义了 `encrypt_fields = {"credentials.private_key"}`。只有启用 `apisix.data_encryption.enable_encrypt_fields` 并配置有效的 keyring 时，直接配置的私钥才会在 etcd 中加密；独立模式的 YAML 配置不会被加密。建议使用 [APISIX Secret](../terminology/secret.md) 引用，避免密钥材料保存在路由配置中。
 
 ### 签名算法
 
-| 值 | SignatureMethod URI | DigestMethod URI | 用途 |
-| --- | --- | --- | --- |
-| `rsa-sha256` | `http://www.w3.org/2001/04/xmldsig-more#rsa-sha256` | `http://www.w3.org/2001/04/xmlenc#sha256` | 默认且推荐。 |
-| `rsa-sha1` | `http://www.w3.org/2000/09/xmldsig#rsa-sha1` | `http://www.w3.org/2000/09/xmldsig#sha1` | 仅用于兼容旧版 WS-Security。 |
+| 值 | SignatureMethod URI | DigestMethod URI | 最小 RSA 密钥长度 | 用途 |
+| --- | --- | --- | --- | --- |
+| `rsa-sha256` | `http://www.w3.org/2001/04/xmldsig-more#rsa-sha256` | `http://www.w3.org/2001/04/xmlenc#sha256` | 2048 位 | 默认且推荐。 |
+| `rsa-sha1` | `http://www.w3.org/2000/09/xmldsig#rsa-sha1` | `http://www.w3.org/2000/09/xmldsig#sha1` | 1024 位 | 仅用于兼容旧版 WS-Security，可使用部分旧系统仍在使用的 1024 位密钥。 |
 
 :::warning
 
@@ -247,9 +254,9 @@ curl http://127.0.0.1:9080/signed-soap \
 | `400` | `invalid_soap` | XML 解析失败、Body 缺失或重复、Header 重复或位于 Body 之后、XML ID（`wsu:Id`、`xml:id` 和无命名空间的 `Id`）无效或重复、`wsse:Security` 标头已包含 `wsu:Timestamp`，或存在 DTD/实体声明。 |
 | `400` | `not_soap` | 根元素不是受支持的 SOAP Envelope，或与 `soap.version` 不匹配。 |
 | `400` | `already_signed` | 消息已包含 `ds:Signature`。 |
-| `413` | `body_too_large` | 请求体超过 `request.max_body_bytes`。 |
+| `413` | `body_too_large` | 请求体超过生效的请求体大小限制（参见 `request.max_body_bytes`）。 |
 | `415` | `unsupported_media_type` | Content-Type 缺失、重复、未列入 `request.content_types` 或声明了非 UTF-8 字符集；或者 Content-Encoding 重复或不是 `identity`。 |
-| `500` | `credential_error` | Secret 解析失败、PEM 解析失败、密钥不是 RSA，或证书与私钥不匹配。 |
+| `500` | `credential_error` | Secret 解析失败、PEM 解析失败、密钥不是 RSA 或短于 `signature.algorithm` 要求的最小长度，或证书与私钥不匹配。 |
 | `500` | `signing_error` | ID 生成、canonicalization、摘要生成、签名或序列化失败。 |
 
 不会向客户端返回详细的密码学信息或请求内容。
@@ -265,7 +272,7 @@ curl http://127.0.0.1:9080/signed-soap \
 
 - 如果服务报告摘要不匹配，请确认没有优先级更低的插件或上游代理修改 Body、Timestamp、命名空间声明或 ID。
 - 如果 APISIX 返回 `not_soap`，请根据 Envelope 命名空间检查 `soap.version`，不要只依赖 Content-Type。
-- 如果 APISIX 返回 `credential_error`，请检查 Secret URI、PEM 边界、RSA 密钥类型以及证书与私钥是否匹配。
+- 如果 APISIX 返回 `credential_error`，请检查 Secret URI、PEM 边界、RSA 密钥类型和长度（`rsa-sha256` 至少 2048 位，`rsa-sha1` 至少 1024 位）以及证书与私钥是否匹配。
 - 如果旧版服务拒绝 RSA-SHA256，请先将其预期算法 URI 与上表比较，再考虑启用 `rsa-sha1`。
 - 如果服务拒绝 `mustUnderstand`，请确认它要求 SOAP 1.1 的数字值还是 SOAP 1.2 的布尔值。
 
