@@ -27,6 +27,45 @@ typedef struct _xmlParserCtxt xmlParserCtxt;
 typedef xmlParserCtxt *xmlParserCtxtPtr;
 typedef struct _xmlError xmlError;
 typedef xmlError *xmlErrorPtr;
+typedef void (*xmlStructuredErrorFunc)(void *userData, xmlErrorPtr error);
+typedef struct _xmlSAXHandler xmlSAXHandler;
+struct _xmlSAXHandler {
+    void *internalSubset;
+    void *isStandalone;
+    void *hasInternalSubset;
+    void *hasExternalSubset;
+    void *resolveEntity;
+    void *getEntity;
+    void *entityDecl;
+    void *notationDecl;
+    void *attributeDecl;
+    void *elementDecl;
+    void *unparsedEntityDecl;
+    void *setDocumentLocator;
+    void *startDocument;
+    void *endDocument;
+    void *startElement;
+    void *endElement;
+    void *reference;
+    void *characters;
+    void *ignorableWhitespace;
+    void *processingInstruction;
+    void *comment;
+    void *warning;
+    void *error;
+    void *fatalError;
+    void *getParameterEntity;
+    void *cdataBlock;
+    void *externalSubset;
+    unsigned int initialized;
+    void *_private;
+    void *startElementNs;
+    void *endElementNs;
+    xmlStructuredErrorFunc serror;
+};
+struct _xmlParserCtxt {
+    xmlSAXHandler *sax;
+};
 typedef struct _xmlNode xmlNode;
 typedef xmlNode *xmlNodePtr;
 typedef struct _xmlNs xmlNs;
@@ -111,7 +150,6 @@ void xmlInitParser(void);
 xmlParserCtxtPtr xmlNewParserCtxt(void);
 xmlDocPtr xmlCtxtReadMemory(xmlParserCtxtPtr ctxt, const char *buffer, int size,
                             const char *URL, const char *encoding, int options);
-xmlErrorPtr xmlCtxtGetLastError(xmlParserCtxtPtr ctxt);
 void xmlFreeParserCtxt(xmlParserCtxtPtr ctxt);
 void xmlFreeDoc(xmlDocPtr cur);
 xmlNodePtr xmlDocGetRootElement(const xmlDoc *doc);
@@ -157,6 +195,8 @@ local XML_ELEMENT_NODE = 1
 local XML_DTD_NODE = 14
 local XML_ERR_ERROR = 2
 local XML_PARSE_NONET = 2048
+local XML_PARSE_NOERROR = 32
+local XML_PARSE_NOWARNING = 64
 local EXCLUSIVE_C14N = 1
 local XML_ID_NAMESPACE = "http://www.w3.org/XML/1998/namespace"
 local WSU_ID_NAMESPACE = "http://docs.oasis-open.org/wss/2004/01/"
@@ -193,10 +233,18 @@ function _M.parse(value)
         return nil, "failed to create XML parser context"
     end
 
-    local doc = C.xmlCtxtReadMemory(ctxt, value, #value, "document.xml", nil, XML_PARSE_NONET)
-    local parse_error = C.xmlCtxtGetLastError(ctxt)
+    local has_error = false
+    local structured_error = ffi.cast("xmlStructuredErrorFunc", function(_, error)
+        if error ~= nil and error.level >= XML_ERR_ERROR then
+            has_error = true
+        end
+    end)
+    ctxt.sax.serror = structured_error
+    local doc = C.xmlCtxtReadMemory(
+        ctxt, value, #value, "document.xml", nil,
+        XML_PARSE_NONET + XML_PARSE_NOERROR + XML_PARSE_NOWARNING)
     C.xmlFreeParserCtxt(ctxt)
-    if doc == nil or (parse_error ~= nil and parse_error.level >= XML_ERR_ERROR) then
+    if doc == nil or has_error then
         if doc ~= nil then
             C.xmlFreeDoc(doc)
         end

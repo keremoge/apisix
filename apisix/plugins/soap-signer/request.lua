@@ -41,6 +41,16 @@ local function contains(values, expected)
 end
 
 
+local function contains_case_insensitive(values, expected)
+    for _, value in ipairs(values) do
+        if value:lower() == expected then
+            return true
+        end
+    end
+    return false
+end
+
+
 local function normalized_content_type(value)
     if not value then
         return ""
@@ -114,7 +124,7 @@ function _M.rewrite(plugin_name, conf, ctx, sign)
         return 415, {message = "unsupported_media_type"}
     end
     local content_type = normalized_content_type(content_type_header)
-    if not contains(conf.request.content_types, content_type) then
+    if not contains_case_insensitive(conf.request.content_types, content_type) then
         return 415, {message = "unsupported_media_type"}
     end
     if has_unsupported_charset(content_type_header) then

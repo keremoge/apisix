@@ -82,7 +82,7 @@ routes: []
                 local conf = {
                     request = {
                         methods = {"POST"},
-                        content_types = {"application/xml"},
+                        content_types = {"Application/XML"},
                         max_body_bytes = 1024,
                     },
                     signature = {algorithm = "rsa-sha256"},
@@ -398,6 +398,7 @@ routes: []
         content_by_lua_block {
             local plugin = require("apisix.plugins.soap-signer")
             local request = require("apisix.plugins.soap-signer.request")
+            assert(plugin.run_policy == "prefer_route")
             local original = request.rewrite
             local input = {
                 credentials = {certificate = "unused", private_key = "unused"},

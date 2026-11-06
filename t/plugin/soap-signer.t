@@ -401,6 +401,7 @@ routes: []
                 envelope('<s:Body xmlns:wsu="' .. signer.namespaces.wsu
                          .. '" wsu:Id="not a valid ID"/>'),
                 envelope("<s:Body><ds:Signature/></s:Body>"),
+                envelope('<s:Body><wsse:Security/><x xml:space="bogus"/></s:Body>'),
             }
             for _, body in ipairs(bodies) do
                 local _, code, err = signer.sign(body, conf, 1790856000)
