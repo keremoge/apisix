@@ -158,7 +158,10 @@ function _M.parse(value)
         return nil, "XML body is empty"
     end
 
-    local doc = C.xmlReadMemory(value, #value, "document.xml", nil, XML_PARSE_NONET)
+    local XML_PARSE_NOERROR = 32
+    local XML_PARSE_NOWARNING = 64
+    local options = XML_PARSE_NONET + XML_PARSE_NOERROR + XML_PARSE_NOWARNING
+    local doc = C.xmlReadMemory(value, #value, "document.xml", nil, options)
     if doc == nil then
         return nil, "failed to parse XML"
     end
