@@ -405,14 +405,17 @@ independent canonical form verified
 
 
 
-=== TEST 8: reject RSA keys shorter than 2048 bits
+=== TEST 8: enforce minimum RSA key size per signature algorithm
 --- apisix_yaml
 routes: []
 #END
 --- config
     location /t {
         content_by_lua_block {
+            local x509 = require("resty.openssl.x509")
             local credentials = require("apisix.plugins.xml-signer.credentials")
+            local signer = require("apisix.plugins.xml-signer.signer")
+            local xml = require("apisix.plugins.xml-signer.xml")
 
             local function read(path)
                 local file = assert(io.open(path, "rb"))
@@ -421,16 +424,56 @@ routes: []
                 return value
             end
 
-            local runtime, err = credentials.load({
+            local weak = {
                 certificate = read("t/certs/server_1024.crt"),
                 private_key = read("t/certs/server_1024.key"),
+            }
+            local body = '<root xmlns="urn:test"><legacy>true</legacy></root>'
+
+            -- the default minimum is 2048 bits
+            local runtime, err = credentials.load(weak)
+            ngx.say(runtime == nil, " ", err)
+
+            -- rsa-sha256 rejects a 1024-bit key
+            local signed, code, detail = signer.sign(body, {
+                credentials = weak,
+                signature = {algorithm = "rsa-sha256"},
             })
-            ngx.say(runtime == nil)
-            ngx.say(err)
+            ngx.say(signed == nil, " ", code, " ", detail)
+
+            -- rsa-sha1 accepts a 1024-bit key for legacy interoperability
+            signed = assert(signer.sign(body, {
+                credentials = weak,
+                signature = {algorithm = "rsa-sha1"},
+            }))
+            local ds = signer.namespaces.ds
+            local doc = assert(xml.parse(signed))
+            local signature = assert(xml.find_all(xml.root(doc), ds, "Signature")[1])
+            local signed_info = assert(xml.find_child(signature, ds, "SignedInfo"))
+            local value = assert(xml.find_child(signature, ds, "SignatureValue"))
+            local public_key = assert(assert(x509.new(weak.certificate, "PEM")):get_pubkey())
+            ngx.say("rsa-sha1 1024-bit verified: ", (public_key:verify(
+                assert(ngx.decode_base64(xml.content(value))),
+                assert(xml.canonicalize(signed_info)), "sha1")))
+            xml.free_document(doc)
+
+            -- the cached key pair is checked again for every minimum
+            runtime, err = credentials.load(weak, 2048)
+            ngx.say(runtime == nil, " ", err)
+
+            -- a 2048-bit key is still rejected when a larger minimum is required
+            runtime, err = credentials.load({
+                certificate = read("t/certs/server.crt"),
+                private_key = read("t/certs/server.key"),
+            }, 4096)
+            ngx.say(runtime == nil, " ", err)
         }
     }
 --- request
 GET /t
 --- response_body
-true
-RSA private key must be at least 2048 bits
+true RSA private key must be at least 2048 bits
+true credential_error RSA private key must be at least 2048 bits
+rsa-sha1 1024-bit verified: true
+true RSA private key must be at least 2048 bits
+true RSA private key must be at least 4096 bits

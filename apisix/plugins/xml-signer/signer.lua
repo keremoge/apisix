@@ -103,7 +103,8 @@ function _M.sign(body, conf, encoding)
         return nil, "already_signed", "XML document already contains a signature"
     end
 
-    local runtime, credential_err = credentials.load(conf.credentials)
+    local runtime, credential_err = credentials.load(conf.credentials,
+                                                     algorithm.min_key_bits)
     if not runtime then
         xml.free_document(doc)
         return nil, "credential_error", credential_err

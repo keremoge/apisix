@@ -23,11 +23,14 @@ local ALGORITHMS = {
         digest = "sha1",
         digest_uri = DS .. "sha1",
         signature_uri = DS .. "rsa-sha1",
+        -- Legacy systems that require SHA-1 often use 1024-bit keys.
+        min_key_bits = 1024,
     },
     ["rsa-sha256"] = {
         digest = "sha256",
         digest_uri = "http://www.w3.org/2001/04/xmlenc#sha256",
         signature_uri = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256",
+        min_key_bits = 2048,
     },
 }
 

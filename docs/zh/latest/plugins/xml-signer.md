@@ -89,7 +89,7 @@ description: xml-signer 插件为 XML 请求体添加 enveloped XML 数字签名
 ## 要求
 
 - APISIX 必须运行在 Linux 上，并且系统中提供 `libxml2.so.2`。APISIX Debian 镜像已包含此库。
-- 证书和私钥必须为 PEM 编码，使用长度至少为 2048 位的 RSA 密钥，并且属于同一密钥对。
+- 证书和私钥必须为 PEM 编码，使用 RSA，并且属于同一密钥对。`rsa-sha256` 要求 RSA 密钥至少为 2048 位，`rsa-sha1` 要求至少为 1024 位。
 - 上游验证方必须支持 exclusive XML canonicalization。
 - 请将插件配置在所有其他请求体修改插件之后。此插件之后对请求体的任何修改都会使签名失效。
 
@@ -111,10 +111,10 @@ description: xml-signer 插件为 XML 请求体添加 enveloped XML 数字签名
 
 ### 签名算法
 
-| 值 | SignatureMethod URI | DigestMethod URI | 用途 |
-| --- | --- | --- | --- |
-| `rsa-sha256` | `http://www.w3.org/2001/04/xmldsig-more#rsa-sha256` | `http://www.w3.org/2001/04/xmlenc#sha256` | 默认且推荐。 |
-| `rsa-sha1` | `http://www.w3.org/2000/09/xmldsig#rsa-sha1` | `http://www.w3.org/2000/09/xmldsig#sha1` | 仅用于兼容旧系统。 |
+| 值 | SignatureMethod URI | DigestMethod URI | 最小 RSA 密钥长度 | 用途 |
+| --- | --- | --- | --- | --- |
+| `rsa-sha256` | `http://www.w3.org/2001/04/xmldsig-more#rsa-sha256` | `http://www.w3.org/2001/04/xmlenc#sha256` | 2048 位 | 默认且推荐。 |
+| `rsa-sha1` | `http://www.w3.org/2000/09/xmldsig#rsa-sha1` | `http://www.w3.org/2000/09/xmldsig#sha1` | 1024 位 | 仅用于兼容旧系统，可使用部分旧系统仍在使用的 1024 位密钥。 |
 
 :::warning
 
@@ -232,7 +232,7 @@ curl http://127.0.0.1:9080/signed-xml \
 | `400` | `already_signed` | 文档已包含 `ds:Signature`。 |
 | `413` | `body_too_large` | 请求体超过生效的请求体大小限制（参见 `request.max_body_bytes`）。 |
 | `415` | `unsupported_media_type` | Content-Type 缺失、重复、未列入 `request.content_types` 或声明了非 UTF-8 字符集；或者 Content-Encoding 重复或不是 `identity`。 |
-| `500` | `credential_error` | Secret 解析失败、PEM 解析失败、密钥不是 RSA 或短于 2048 位，或证书与私钥不匹配。 |
+| `500` | `credential_error` | Secret 解析失败、PEM 解析失败、密钥不是 RSA 或短于 `signature.algorithm` 要求的最小长度，或证书与私钥不匹配。 |
 | `500` | `signing_error` | canonicalization、摘要生成、签名或序列化失败。 |
 
 不会向客户端返回详细的密码学信息或请求内容。
@@ -247,7 +247,7 @@ curl http://127.0.0.1:9080/signed-xml \
 ## 故障排查
 
 - 如果上游报告摘要不匹配，请确认没有优先级低于 `xml-signer` 的插件在其后修改请求体。
-- 如果 APISIX 返回 `credential_error`，请检查 Secret URI、PEM 边界、RSA 密钥类型和长度（至少 2048 位）以及证书与私钥是否匹配。
+- 如果 APISIX 返回 `credential_error`，请检查 Secret URI、PEM 边界、RSA 密钥类型和长度（`rsa-sha256` 至少 2048 位，`rsa-sha1` 至少 1024 位）以及证书与私钥是否匹配。
 - 如果旧版验证方拒绝签名，请将其要求的算法 URI 与上表比较，并确认它支持 exclusive C14N。
 - 如果请求返回 `415`，请在 `request.content_types` 中加入 XML 媒体类型，或修正客户端的 Content-Type 标头。
 

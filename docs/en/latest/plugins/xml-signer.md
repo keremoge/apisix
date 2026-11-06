@@ -112,8 +112,9 @@ The generated signature has the following structure:
   images include this library.
 - APISIX-Runtime must be built to enforce `request.max_body_bytes` while NGINX
   reads the request body.
-- The certificate and private key must be PEM encoded, use RSA with a key of
-  at least 2048 bits, and form a matching key pair.
+- The certificate and private key must be PEM encoded, use RSA, and form a
+  matching key pair. The RSA key must be at least 2048 bits for `rsa-sha256`
+  and at least 1024 bits for `rsa-sha1`.
 - The upstream verifier must support exclusive XML canonicalization.
 - Configure the Plugin after any other Plugin that modifies the request body.
   Any later body modification invalidates the signature.
@@ -141,10 +142,10 @@ Route configuration.
 
 ### Signature Algorithms
 
-| Value | SignatureMethod URI | DigestMethod URI | Usage |
-| --- | --- | --- | --- |
-| `rsa-sha256` | `http://www.w3.org/2001/04/xmldsig-more#rsa-sha256` | `http://www.w3.org/2001/04/xmlenc#sha256` | Default and recommended. |
-| `rsa-sha1` | `http://www.w3.org/2000/09/xmldsig#rsa-sha1` | `http://www.w3.org/2000/09/xmldsig#sha1` | Legacy compatibility only. |
+| Value | SignatureMethod URI | DigestMethod URI | Minimum RSA key size | Usage |
+| --- | --- | --- | --- | --- |
+| `rsa-sha256` | `http://www.w3.org/2001/04/xmldsig-more#rsa-sha256` | `http://www.w3.org/2001/04/xmlenc#sha256` | 2048 bits | Default and recommended. |
+| `rsa-sha1` | `http://www.w3.org/2000/09/xmldsig#rsa-sha1` | `http://www.w3.org/2000/09/xmldsig#sha1` | 1024 bits | Legacy compatibility only. Accepts 1024-bit keys still used by some legacy systems. |
 
 :::warning
 
@@ -323,7 +324,7 @@ through unchanged.
 | `400` | `already_signed` | The document already contains a `ds:Signature`. |
 | `413` | `body_too_large` | The body exceeds the effective body size limit (see `request.max_body_bytes`). |
 | `415` | `unsupported_media_type` | Content-Type is missing, repeated, not listed in `request.content_types`, or declares a non-UTF-8 charset; or Content-Encoding is repeated or is not `identity`. |
-| `500` | `credential_error` | A Secret could not be resolved, PEM parsing failed, the key is not RSA or is shorter than 2048 bits, or the certificate and key do not match. |
+| `500` | `credential_error` | A Secret could not be resolved, PEM parsing failed, the key is not RSA or is shorter than the minimum size for `signature.algorithm`, or the certificate and key do not match. |
 | `500` | `signing_error` | Canonicalization, digest generation, signing, or serialization failed. |
 
 The Plugin does not return detailed cryptographic or request content to clients.
@@ -344,8 +345,8 @@ The Plugin does not return detailed cryptographic or request content to clients.
 - If the upstream reports a digest mismatch, confirm no Plugin with a lower
   priority changes the body after `xml-signer`.
 - If APISIX returns `credential_error`, verify the Secret URI, PEM boundaries,
-  RSA key type and size (at least 2048 bits), and certificate/private-key
-  match.
+  RSA key type and size (2048 bits for `rsa-sha256`, 1024 bits for
+  `rsa-sha1`), and certificate/private-key match.
 - If a legacy verifier rejects the signature, compare its required algorithm
   URIs with the table above and confirm it supports exclusive C14N.
 - If requests return `415`, include the XML media type in

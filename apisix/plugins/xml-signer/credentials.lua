@@ -24,7 +24,8 @@ local tostring = tostring
 local type = type
 
 -- RSA keys shorter than 2048 bits are considered insecure (NIST SP 800-131A).
-local MIN_RSA_KEY_BITS = 2048
+-- Callers may lower the minimum for legacy algorithms.
+local DEFAULT_MIN_RSA_KEY_BITS = 2048
 
 
 local credential_cache = core.lrucache.new({
@@ -59,8 +60,8 @@ local function parse_credentials(certificate_pem, private_key_pem)
     -- get_size() returns the maximum signature size in bytes, which is the
     -- RSA modulus length.
     local key_size = private_key:get_size()
-    if not key_size or key_size * 8 < MIN_RSA_KEY_BITS then
-        return nil, "RSA private key must be at least " .. MIN_RSA_KEY_BITS .. " bits"
+    if not key_size then
+        return nil, "cannot determine RSA private key size"
     end
 
     local certificate, certificate_err = x509.new(certificate_pem, "PEM")
@@ -82,11 +83,14 @@ local function parse_credentials(certificate_pem, private_key_pem)
         private_key = private_key,
         certificate = certificate,
         certificate_der = certificate_der,
+        key_bits = key_size * 8,
     }
 end
 
 
-function _M.load(conf)
+-- min_key_bits defaults to 2048. The size is checked after the cache lookup
+-- so that one key pair can be shared by Routes with different minimums.
+function _M.load(conf, min_key_bits)
     if type(conf) ~= "table" then
         return nil, "credentials are required"
     end
@@ -104,8 +108,17 @@ function _M.load(conf)
     end
 
     local cache_key = fingerprint(certificate_pem, private_key_pem)
-    return credential_cache(cache_key, nil, parse_credentials,
-                            certificate_pem, private_key_pem)
+    local runtime, err = credential_cache(cache_key, nil, parse_credentials,
+                                          certificate_pem, private_key_pem)
+    if not runtime then
+        return nil, err
+    end
+
+    min_key_bits = min_key_bits or DEFAULT_MIN_RSA_KEY_BITS
+    if runtime.key_bits < min_key_bits then
+        return nil, "RSA private key must be at least " .. min_key_bits .. " bits"
+    end
+    return runtime
 end
 
 
