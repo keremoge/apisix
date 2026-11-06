@@ -105,6 +105,20 @@ __DATA__
             call("POST", "application/xml", exact)
             call("POST", "application/xml", exact .. " ")
             call("POST", "application/xml", "")
+            local chunks = 3
+            local res = assert(http.new():request_uri(
+                "http://127.0.0.1:" .. ngx.var.server_port .. "/xml",
+                {method = "POST",
+                 body = function()
+                     if chunks == 0 then
+                         return nil
+                     end
+                     chunks = chunks - 1
+                     return string.rep("x", 8192)
+                 end,
+                 headers = {["Content-Type"] = "application/xml"}}))
+            assert(res.status == 413, res.body)
+            ngx.say(res.status)
         }
     }
 --- request
@@ -117,6 +131,7 @@ GET /t
 200 signatures=1 length_ok=true
 413 body_too_large
 400 empty_body
+413
 --- error_log
 xml-signer rejected request: invalid_xml
 xml-signer failed to read request body: request size 16385 is greater than the maximum size 16384 allowed

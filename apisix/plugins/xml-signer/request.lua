@@ -15,6 +15,7 @@
 -- limitations under the License.
 --
 local core = require("apisix.core")
+local runtime_ok, apisix_ngx_client = pcall(require, "resty.apisix.client")
 
 local ipairs = ipairs
 local ngx = ngx
@@ -129,6 +130,22 @@ function _M.rewrite(plugin_name, conf, ctx, sign)
     local unsupported_charset, charset = has_unsupported_charset(content_type_header)
     if unsupported_charset then
         return 415, {message = "unsupported_media_type"}
+    end
+
+    if not runtime_ok then
+        core.log.error(plugin_name, " requires APISIX-Runtime to limit request body size")
+        return 501, {message = "internal_error"}
+    end
+    local max_body_bytes = conf.request.max_body_bytes
+    if ctx and ctx.client_max_body_size and ctx.client_max_body_size > 0
+       and ctx.client_max_body_size < max_body_bytes then
+        max_body_bytes = ctx.client_max_body_size
+    end
+    local limit_ok, limit_err = apisix_ngx_client.set_client_max_body_size(
+        max_body_bytes)
+    if not limit_ok then
+        core.log.error(plugin_name, " failed to set client max body size: ", limit_err)
+        return 503, {message = "internal_error"}
     end
 
     local body, body_err, body_err_code = core.request.get_body(

@@ -99,6 +99,8 @@ The generated signature has the following structure:
 
 - APISIX must run on Linux with `libxml2.so.2` available. The APISIX Debian
   images include this library.
+- APISIX-Runtime must be built to enforce `request.max_body_bytes` while NGINX
+  reads the request body.
 - The certificate and private key must be PEM encoded, use RSA, and form a
   matching key pair.
 - The upstream verifier must support exclusive XML canonicalization.
