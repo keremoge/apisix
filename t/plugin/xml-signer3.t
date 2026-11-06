@@ -36,6 +36,7 @@ routes: []
 
             local original = {
                 get_method = ngx.req.get_method,
+                get_headers = ngx.req.get_headers,
                 set_body_data = ngx.req.set_body_data,
                 headers = core.request.headers,
                 get_body = core.request.get_body,
@@ -49,18 +50,32 @@ routes: []
             local body_err_code
             local rewritten_body
             local cleared_headers = {}
+            local truncate_content_encoding = false
 
             ngx.req.get_method = function()
                 return method
+            end
+            ngx.req.get_headers = function(max_headers)
+                assert(max_headers == 0)
+                local headers = {}
+                for i = 1, 101 do
+                    headers["x-test-header-" .. i] = "value"
+                end
+                headers["content-type"] = content_type
+                headers["content-encoding"] = content_encoding
+                return headers
             end
             ngx.req.set_body_data = function(value)
                 rewritten_body = value
             end
             core.request.headers = function()
-                return {
+                local headers = {
                     ["content-type"] = content_type,
-                    ["content-encoding"] = content_encoding,
                 }
+                if not truncate_content_encoding then
+                    headers["content-encoding"] = content_encoding
+                end
+                return headers
             end
             core.request.get_body = function()
                 return body, body_err, body_err_code
@@ -99,6 +114,15 @@ routes: []
                     assert(cleared_headers[name])
                 end
 
+                content_type = "application/xml"
+                content_encoding = "gzip"
+                truncate_content_encoding = true
+                local status = request.rewrite("xml-signer", conf, {}, sign)
+                assert(status == 415)
+                assert(sign_calls == 1)
+
+                content_encoding = nil
+                truncate_content_encoding = false
                 method = "GET"
                 assert(request.rewrite("xml-signer", conf, {}, sign) == nil)
                 assert(sign_calls == 1)
@@ -202,6 +226,7 @@ routes: []
             end)
 
             ngx.req.get_method = original.get_method
+            ngx.req.get_headers = original.get_headers
             ngx.req.set_body_data = original.set_body_data
             core.request.headers = original.headers
             core.request.get_body = original.get_body

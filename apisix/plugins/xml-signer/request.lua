@@ -102,7 +102,7 @@ function _M.rewrite(plugin_name, conf, ctx, sign)
         return
     end
 
-    local headers = core.request.headers(ctx)
+    local headers = ngx.req.get_headers(0)
     local content_encoding = headers["content-encoding"]
     if content_encoding ~= nil
        and (type(content_encoding) ~= "string"
