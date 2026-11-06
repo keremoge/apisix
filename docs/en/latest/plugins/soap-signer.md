@@ -37,13 +37,13 @@ BinarySecurityToken, and an XML Signature over the SOAP Body and Timestamp.
 The Plugin supports RSA-SHA256 for normal use and RSA-SHA1 for interoperability
 with legacy SOAP services. It uses exclusive XML canonicalization without
 comments. By default, it references an embedded certificate through a
-WS-Security `SecurityTokenReference`; KeyInfo and the token can be omitted when
+WS-Security `SecurityTokenReference`. You can omit KeyInfo and the token when
 the verifier obtains the certificate out of band.
 
 Do not combine this Plugin with another request-signing Plugin on the same
-Route. Messages that already contain an XML signature are rejected.
+Route. The Plugin rejects messages that already contain an XML signature.
 
-## How it works
+## How It Works
 
 For a matching request, the Plugin performs the following operations during the
 rewrite phase:
@@ -58,18 +58,19 @@ rewrite phase:
 5. Assigns a `wsu:Id` to the Body when it does not already have one.
 6. Creates a UTC Timestamp with `Created`, `Expires`, and a unique `wsu:Id`.
 7. Embeds the X.509 certificate in a `wsse:BinarySecurityToken` unless
-  `signature.key_info` is `none`.
+   `signature.key_info` is `none`.
 8. Calculates a digest for both the Body and Timestamp using the algorithm
    selected by `signature.algorithm`.
 9. Signs canonicalized `ds:SignedInfo`, replaces the upstream request body,
    updates `Content-Length`, and removes body-digest headers that no longer
    describe the signed body.
 
-The body is serialized as UTF-8. Requests with an explicit non-UTF-8 `charset`
-are rejected.
-Compressed request bodies must be decoded before signing, for example with
-the `request-decompress` Plugin. A remaining Content-Encoding other than
-`identity` is rejected.
+The Plugin serializes the body as UTF-8. It rejects requests with an explicit
+non-UTF-8 `charset`.
+
+Decode compressed request bodies before signing, for example with the
+[`request-decompress`](request-decompress.md) Plugin. The signing Plugin
+rejects a remaining Content-Encoding other than `identity`.
 
 The generated security header has this general structure:
 
@@ -124,13 +125,13 @@ The generated security header has this general structure:
 | `request.max_body_bytes` | integer | False | `5242880` | Maximum request body size in bytes. Valid range: 1024 to 67108864. |
 
 NOTE: The schema declares `encrypt_fields = {"credentials.private_key"}`.
-A directly configured private key is encrypted in etcd only when
-`apisix.data_encryption.enable_encrypt_fields` is enabled and a valid keyring
-is configured. This does not encrypt standalone YAML configuration. Using
-[APISIX Secret](../terminology/secret.md) references is recommended so key
-material is not stored in Route configuration.
+APISIX encrypts a directly configured private key in etcd only when you enable
+`apisix.data_encryption.enable_encrypt_fields` and configure a valid keyring.
+This does not encrypt standalone YAML configuration. Use
+[APISIX Secret](../terminology/secret.md) references to keep key material out of
+Route configuration.
 
-### Signature algorithms
+### Signature Algorithms
 
 | Value | SignatureMethod URI | DigestMethod URI | Usage |
 | --- | --- | --- | --- |
@@ -139,14 +140,14 @@ material is not stored in Route configuration.
 
 :::warning
 
-SHA-1 is cryptographically weak and should only be enabled when a legacy SOAP
-service cannot validate RSA-SHA256 signatures. APISIX logs a warning whenever
+SHA-1 is cryptographically weak. Enable it only when a legacy SOAP service
+cannot validate RSA-SHA256 signatures. APISIX logs a warning whenever
 it signs a request with `rsa-sha1`. Use TLS, restrict network access, rotate
 credentials regularly, and plan migration to RSA-SHA256.
 
 :::
 
-### SOAP version behavior
+### SOAP Version Behavior
 
 | `soap.version` | Behavior |
 | --- | --- |
@@ -154,7 +155,7 @@ credentials regularly, and plan migration to RSA-SHA256.
 | `1.1` | Require `http://schemas.xmlsoap.org/soap/envelope/`. `mustUnderstand` is serialized as `1` or `0`. |
 | `1.2` | Require `http://www.w3.org/2003/05/soap-envelope`. `mustUnderstand` is serialized as `true` or `false`. |
 
-## Configure credentials
+## Configure Credentials
 
 Use [APISIX Secret](../terminology/secret.md) references to keep private key
 material out of Route configuration. The format is:
@@ -179,7 +180,7 @@ cached per worker using a fingerprint of the resolved values. Rotated Secret
 values are used when the APISIX Secret cache refreshes; a worker restart is not
 required.
 
-### Use environment variables
+### Use Environment Variables
 
 Without an external secret manager, such as on Kubernetes, expose the PEM
 values as environment variables and reference them with `$env://<NAME>`.
@@ -266,8 +267,8 @@ certificate and expects no `ds:KeyInfo`. In this mode, the Plugin also omits
 `wsse:BinarySecurityToken` because no generated element references it. The Body
 and Timestamp remain signed.
 
-The Plugin still requires both credentials: the private key signs the message
-and the certificate validates that the configured key pair matches.
+The Plugin still requires both credentials: it uses the private key to sign the
+message and the certificate to validate that the configured key pair matches.
 
 The following Admin API request creates a SOAP Route without KeyInfo:
 
@@ -302,7 +303,7 @@ including references to the Body and Timestamp, but contains no
 `wsse:BinarySecurityToken` or `ds:KeyInfo`. The upstream must select the trusted
 verification certificate through its own configuration.
 
-## Example usage
+## Example Usage
 
 Send a SOAP 1.2 request:
 
@@ -324,7 +325,7 @@ The upstream receives the original SOAP message with a signed WS-Security
 header. Requests whose method is not listed in `request.methods` pass through
 unchanged.
 
-## Error responses
+## Error Responses
 
 | HTTP status | Message | Cause |
 | --- | --- | --- |
@@ -337,7 +338,7 @@ unchanged.
 | `500` | `credential_error` | A Secret could not be resolved, PEM parsing failed, the key is not RSA, or the certificate and key do not match. |
 | `500` | `signing_error` | ID generation, canonicalization, digest generation, signing, or serialization failed. |
 
-Detailed cryptographic and request content is not returned to clients.
+The Plugin does not return detailed cryptographic or request content to clients.
 
 ## Limitations
 
