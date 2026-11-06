@@ -87,6 +87,7 @@ local _M = {
     priority = 1026,
     name = plugin_name,
     schema = schema,
+    run_policy = "prefer_route",
 }
 
 
