@@ -158,6 +158,9 @@ function _M.rewrite(plugin_name, conf, ctx, sign)
     end
 
     ngx.req.set_body_data(signed)
+    if ctx.var and ctx.var._cache then
+        ctx.var._cache.http_content_length = nil
+    end
     core.request.set_header(ctx, "Content-Length", tostring(#signed))
     core.request.set_header(ctx, "Transfer-Encoding", nil)
     for _, header in ipairs(BODY_DIGEST_HEADERS) do
