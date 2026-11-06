@@ -400,6 +400,7 @@ routes: []
                          .. 'Id="duplicate"/></s:Body>'),
                 envelope('<s:Body xmlns:wsu="' .. signer.namespaces.wsu
                          .. '" wsu:Id="not a valid ID"/>'),
+                envelope("<s:Body><ds:Signature/></s:Body>"),
             }
             for _, body in ipairs(bodies) do
                 local _, code, err = signer.sign(body, conf, 1790856000)
@@ -418,6 +419,7 @@ invalid_soap: DTD and entity declarations are not allowed
 invalid_soap: duplicate XML ID
 invalid_soap: duplicate XML ID
 invalid_soap: invalid XML ID
+invalid_soap: failed to parse XML
 
 
 

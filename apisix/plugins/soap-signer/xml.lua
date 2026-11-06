@@ -23,6 +23,10 @@ ffi.cdef[[
 typedef unsigned char xmlChar;
 typedef struct _xmlDoc xmlDoc;
 typedef xmlDoc *xmlDocPtr;
+typedef struct _xmlParserCtxt xmlParserCtxt;
+typedef xmlParserCtxt *xmlParserCtxtPtr;
+typedef struct _xmlError xmlError;
+typedef xmlError *xmlErrorPtr;
 typedef struct _xmlNode xmlNode;
 typedef xmlNode *xmlNodePtr;
 typedef struct _xmlNs xmlNs;
@@ -91,10 +95,24 @@ struct _xmlNode {
 ]]
 end
 
+if ffi.sizeof("struct _xmlError") == nil then
+    ffi.cdef[[
+struct _xmlError {
+    int domain;
+    int code;
+    char *message;
+    int level;
+};
+]]
+end
+
 ffi.cdef[[
 void xmlInitParser(void);
-xmlDocPtr xmlReadMemory(const char *buffer, int size, const char *URL,
-                        const char *encoding, int options);
+xmlParserCtxtPtr xmlNewParserCtxt(void);
+xmlDocPtr xmlCtxtReadMemory(xmlParserCtxtPtr ctxt, const char *buffer, int size,
+                            const char *URL, const char *encoding, int options);
+xmlErrorPtr xmlCtxtGetLastError(xmlParserCtxtPtr ctxt);
+void xmlFreeParserCtxt(xmlParserCtxtPtr ctxt);
 void xmlFreeDoc(xmlDocPtr cur);
 xmlNodePtr xmlDocGetRootElement(const xmlDoc *doc);
 xmlDocPtr xmlNewDoc(const xmlChar *version);
@@ -137,6 +155,7 @@ C.xmlInitParser()
 
 local XML_ELEMENT_NODE = 1
 local XML_DTD_NODE = 14
+local XML_ERR_ERROR = 2
 local XML_PARSE_NONET = 2048
 local EXCLUSIVE_C14N = 1
 local XML_ID_NAMESPACE = "http://www.w3.org/XML/1998/namespace"
@@ -169,8 +188,18 @@ function _M.parse(value)
         return nil, "XML body is empty"
     end
 
-    local doc = C.xmlReadMemory(value, #value, "document.xml", nil, XML_PARSE_NONET)
-    if doc == nil then
+    local ctxt = C.xmlNewParserCtxt()
+    if ctxt == nil then
+        return nil, "failed to create XML parser context"
+    end
+
+    local doc = C.xmlCtxtReadMemory(ctxt, value, #value, "document.xml", nil, XML_PARSE_NONET)
+    local parse_error = C.xmlCtxtGetLastError(ctxt)
+    C.xmlFreeParserCtxt(ctxt)
+    if doc == nil or (parse_error ~= nil and parse_error.level >= XML_ERR_ERROR) then
+        if doc ~= nil then
+            C.xmlFreeDoc(doc)
+        end
         return nil, "failed to parse XML"
     end
 
