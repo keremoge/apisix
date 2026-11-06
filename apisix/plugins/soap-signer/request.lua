@@ -152,6 +152,10 @@ function _M.rewrite(plugin_name, conf, ctx, sign)
 
     ngx.req.set_body_data(signed)
     core.request.set_header(ctx, "Content-Length", tostring(#signed))
+    local var_cache = ctx.var and ctx.var._cache
+    if var_cache then
+        var_cache.http_content_length = nil
+    end
     core.request.set_header(ctx, "Transfer-Encoding", nil)
     for _, header in ipairs(BODY_DIGEST_HEADERS) do
         core.request.set_header(ctx, header, nil)
