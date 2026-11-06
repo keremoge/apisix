@@ -67,7 +67,7 @@ local schema = {
                     type = "array",
                     minItems = 1,
                     uniqueItems = true,
-                    items = {type = "string", minLength = 1},
+                    items = core.schema.method_schema,
                     default = {"POST"},
                 },
                 content_types = {
