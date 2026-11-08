@@ -650,3 +650,84 @@ GET /t
 true
 --- error_log
 the signing certificate expired at 2021-10-28T03:33:02Z; verifiers will reject the signatures
+
+
+
+=== TEST 12: sign namespace declarations used only in content with InclusiveNamespaces
+--- apisix_yaml
+routes: []
+#END
+--- config
+    location /t {
+        content_by_lua_block {
+            local digest = require("resty.openssl.digest")
+            local x509 = require("resty.openssl.x509")
+            local signer = require("apisix.plugins.xml-signer.signer")
+            local xml = require("apisix.plugins.xml-signer.xml")
+            local ds = signer.namespaces.ds
+            local exclusive = "http://www.w3.org/2001/10/xml-exc-c14n#"
+
+            local function read(path)
+                local file = assert(io.open(path, "rb"))
+                local value = file:read("*a")
+                file:close()
+                return value
+            end
+
+            local certificate_pem = read("t/certs/server.crt")
+            local conf = {credentials = {
+                certificate = certificate_pem,
+                private_key = read("t/certs/server.key"),
+            }}
+            local function sha256(value)
+                local context = assert(digest.new("sha256"))
+                assert(context:update(value))
+                return ngx.encode_base64(assert(context:final()))
+            end
+            local function inspect(signed)
+                local doc = assert(xml.parse(signed))
+                local signature = assert(xml.find_all(xml.root(doc), ds, "Signature")[1])
+                local signed_info = assert(xml.find_child(signature, ds, "SignedInfo"))
+                local inclusive = xml.find_all(signed_info, exclusive, "InclusiveNamespaces")[1]
+                local prefix_list = inclusive and xml.get_property(inclusive, "PrefixList")
+                local value = assert(xml.find_child(signature, ds, "SignatureValue"))
+                local public_key = assert(assert(x509.new(certificate_pem, "PEM")):get_pubkey())
+                local verified = public_key:verify(
+                    assert(ngx.decode_base64(xml.content(value))),
+                    assert(xml.canonicalize(signed_info)), "sha256")
+                local expected = xml.content(assert(xml.find_all(signed_info, ds, "DigestValue")[1]))
+                xml.free_document(doc)
+                return prefix_list, verified, expected
+            end
+            local function document_digest(signed, prefixes)
+                local doc = assert(xml.parse(signed))
+                xml.remove(assert(xml.find_all(xml.root(doc), ds, "Signature")[1]))
+                local value = sha256(assert(xml.canonicalize_document(doc, prefixes)))
+                xml.free_document(doc)
+                return value
+            end
+
+            -- "ns" is only used inside an attribute value
+            local signed = assert(signer.sign(
+                '<r xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:ns="urn:orders:v1">'
+                .. '<item xsi:type="ns:Order">42</item></r>', conf))
+            local prefix_list, verified, expected = inspect(signed)
+            ngx.say("PrefixList=", prefix_list, " signature=", verified)
+            ngx.say("digest matches: ", document_digest(signed, {"ns"}) == expected)
+            -- rebinding the prefix must invalidate the reference digest
+            local rebound = signed:gsub("urn:orders:v1", "urn:attacker")
+            ngx.say("rebound digest matches: ", document_digest(rebound, {"ns"}) == expected)
+
+            -- when every declaration is used, the output is unchanged
+            signed = assert(signer.sign('<p:r xmlns:p="urn:p"><p:x/></p:r>', conf))
+            prefix_list, verified = inspect(signed)
+            ngx.say("PrefixList=", tostring(prefix_list), " signature=", verified)
+        }
+    }
+--- request
+GET /t
+--- response_body
+PrefixList=ns signature=true
+digest matches: true
+rebound digest matches: false
+PrefixList=nil signature=true

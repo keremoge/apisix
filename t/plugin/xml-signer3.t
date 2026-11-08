@@ -101,6 +101,7 @@ routes: []
                         methods = {"POST"},
                         content_types = {"application/xml"},
                         max_body_bytes = 1024,
+                        require_consumer = false,
                     },
                     signature = {algorithm = "rsa-sha256"},
                 }
@@ -334,6 +335,7 @@ routes: []
                 assert(conf.request.methods[1] == "POST")
                 assert(conf.request.content_types[2] == "text/xml")
                 assert(conf.request.max_body_bytes == 5242880)
+                assert(conf.request.require_consumer == true)
                 return 207
             end
             local ok, err = pcall(function()
@@ -380,7 +382,7 @@ routes: []
                 local plugin = require("apisix.plugins.xml-signer")
                 local status, body = plugin.rewrite({
                     credentials = {certificate = "unused", private_key = "unused"},
-                }, {})
+                }, {consumer = {username = "client"}})
                 ngx.say(status, " ", body.message)
             end)
 
@@ -401,3 +403,50 @@ Content-Type: application/xml
 --- error_log
 xml-signer is unavailable and will reject requests: libxml2 is not available
 xml-signer rejected request: signing_error: libxml2 is not available
+
+
+
+=== TEST 5: require an authenticated Consumer unless explicitly disabled
+--- apisix_yaml
+routes: []
+#END
+--- config
+    location /t {
+        content_by_lua_block {
+            local request = require("apisix.plugins.xml-signer.request")
+            local function sign()
+                error("must not be reached")
+            end
+            local function conf(require_consumer)
+                return {
+                    request = {
+                        methods = {"GET"},
+                        content_types = {"application/xml"},
+                        max_body_bytes = 1024,
+                        require_consumer = require_consumer,
+                    },
+                    signature = {algorithm = "rsa-sha256"},
+                }
+            end
+
+            -- this GET has no Content-Type, so a request that passes the
+            -- Consumer check stops with 415
+            local cases = {
+                {"default, no Consumer", conf(nil), {}},
+                {"required, no Consumer", conf(true), {}},
+                {"required, Consumer", conf(true), {consumer = {username = "client"}}},
+                {"disabled, no Consumer", conf(false), {}},
+            }
+            for _, case in ipairs(cases) do
+                local status, body = request.rewrite("xml-signer", case[2], case[3], sign)
+                ngx.say(case[1], ": ", status, " ", body.message)
+            end
+        }
+    }
+--- request
+GET /t
+--- response_body
+default, no Consumer: 401 unauthorized
+required, no Consumer: 401 unauthorized
+required, Consumer: 415 unsupported_media_type
+disabled, no Consumer: 415 unsupported_media_type

@@ -88,6 +88,13 @@ local schema = {
                     maximum = 67108864,
                     default = 5242880,
                 },
+                -- Sign only requests that an authentication Plugin attributed
+                -- to a Consumer, so that anonymous clients cannot obtain
+                -- signatures made with the configured key.
+                require_consumer = {
+                    type = "boolean",
+                    default = true,
+                },
             },
         },
     },
@@ -120,6 +127,7 @@ local function normalize_conf(original)
     set_default(conf.request, "methods", {"POST"})
     set_default(conf.request, "content_types", {"application/xml", "text/xml"})
     set_default(conf.request, "max_body_bytes", 5242880)
+    set_default(conf.request, "require_consumer", true)
     return conf
 end
 

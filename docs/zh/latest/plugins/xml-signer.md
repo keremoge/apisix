@@ -38,7 +38,7 @@ description: xml-signer 插件为 XML 请求体添加 enveloped XML 数字签名
 
 :::caution
 
-插件会使用配置的私钥为到达它的每个格式正确的 XML 文档签名。因此，任何能够向该路由发送请求的客户端都可以获得由你的私钥生成的签名。请在路由上启用认证插件（例如 [`key-auth`](key-auth.md) 或 [`jwt-auth`](jwt-auth.md)），确保只有可信客户端能够访问本插件。认证插件会在 `xml-signer` 之前执行。
+插件会使用配置的私钥为到达它的每个格式正确的 XML 文档签名。默认情况下（`request.require_consumer` 为 `true`），插件只为已由认证插件（例如 [`key-auth`](key-auth.md) 或 [`jwt-auth`](jwt-auth.md)）关联到消费者的请求签名，否则返回 `401`。认证插件会在 `xml-signer` 之前执行。认证插件上配置的 `anonymous_consumer` 同样满足此检查，因此不要在签名路由上配置匿名消费者。只有当路由已通过其他方式受到保护（例如 mTLS、`ip-restriction` 或 `forward-auth`）时，才应将 `request.require_consumer` 设置为 `false`。
 
 :::
 
@@ -46,15 +46,16 @@ description: xml-signer 插件为 XML 请求体添加 enveloped XML 数字签名
 
 匹配的请求在 rewrite 阶段会依次执行以下操作：
 
-1. 将请求体缓冲到 `request.max_body_bytes` 限制以内。
-2. 在禁用外部网络访问的情况下解析 XML。
-3. 拒绝 DTD、实体声明以及已包含 `ds:Signature` 元素的文档。
-4. 对文档执行 exclusive XML canonicalization。
-5. 使用 `signature.algorithm` 指定的算法计算引用摘要。
-6. 在文档根元素下创建 enveloped `ds:Signature`。
-7. 除非 `signature.key_info` 为 `none`，否则添加 X.509 `ds:KeyInfo`。
-8. 对 `ds:SignedInfo` 执行 canonicalization，并使用配置的 RSA 私钥签名。
-9. 替换发往上游的请求体、更新 `Content-Length`，并移除不再对应签名后请求体的摘要标头。
+1. 当 `request.require_consumer` 为 `true` 时，如果请求未被认证插件关联到消费者，则返回 `401`。
+2. 将请求体缓冲到 `request.max_body_bytes` 限制以内。
+3. 在禁用外部网络访问的情况下解析 XML。
+4. 拒绝 DTD、实体声明以及已包含 `ds:Signature` 元素的文档。
+5. 对文档执行 exclusive XML canonicalization。没有被任何元素名或属性名使用的命名空间声明会列入 `ec:InclusiveNamespaces` 的 `PrefixList`，从而同样受签名保护。
+6. 使用 `signature.algorithm` 指定的算法计算引用摘要。
+7. 在文档根元素下创建 enveloped `ds:Signature`。
+8. 除非 `signature.key_info` 为 `none`，否则添加 X.509 `ds:KeyInfo`。
+9. 对 `ds:SignedInfo` 执行 canonicalization，并使用配置的 RSA 私钥签名。
+10. 替换发往上游的请求体、更新 `Content-Length`，并移除不再对应签名后请求体的摘要标头。
 
 签名后的请求体会以 UTF-8 序列化，因此缩进、引号风格等无关格式可能与原请求不同。显式声明非 UTF-8 `charset` 的请求会被拒绝。
 
@@ -105,6 +106,7 @@ description: xml-signer 插件为 XML 请求体添加 enveloped XML 数字签名
 | `signature.key_info` | string | 否 | `x509_data` | 签名中包含的密钥信息。使用 `x509_data` 嵌入证书，或使用 `none` 省略 `ds:KeyInfo`。 |
 | `request.methods` | array[string] | 否 | `["POST"]` | 要签名的请求方法。其他方法的请求保持不变并直接转发。 |
 | `request.content_types` | array[string] | 否 | `["application/xml", "text/xml"]` | 接受的媒体类型；会忽略其他参数，但会拒绝显式声明非 UTF-8 `charset` 的请求。 |
+| `request.require_consumer` | boolean | 否 | `true` | 只为已由认证插件关联到消费者的请求签名，其他请求返回 `401`。只有当路由已通过其他方式受到保护时才设置为 `false`。 |
 | `request.max_body_bytes` | integer | 否 | `5242880` | 请求体最大字节数，有效范围为 1024 到 67108864。插件不会将限制提高到非零的 `nginx_config.http.client_max_body_size` 或路由上 `client-control` 配置的 `max_body_size` 之上，以较小值为准。 |
 
 注意：schema 中定义了 `encrypt_fields = {"credentials.private_key"}`。只有启用 `apisix.data_encryption.enable_encrypt_fields` 并配置有效的 keyring 时，直接配置的私钥才会在 etcd 中加密；独立模式的 YAML 配置不会被加密。建议使用 [APISIX Secret](../terminology/secret.md) 引用，避免密钥材料保存在路由配置中。
@@ -145,7 +147,20 @@ APISIX 会在插件执行前解析引用。解析后的凭据会在每个 worker
 
 ## 启用插件
 
-以下示例在路由上启用 RSA-SHA256 签名：
+创建客户端用于认证的消费者，例如使用 [`key-auth`](key-auth.md)：
+
+```shell
+curl http://127.0.0.1:9180/apisix/admin/consumers \
+  -H "X-API-KEY: $admin_key" -X PUT -d '
+{
+  "username": "signer_client",
+  "plugins": {
+    "key-auth": {"key": "signer-client-key"}
+  }
+}'
+```
+
+以下示例在要求 `key-auth` 的路由上启用 RSA-SHA256 签名：
 
 ```shell
 curl http://127.0.0.1:9180/apisix/admin/routes/1 \
@@ -153,6 +168,7 @@ curl http://127.0.0.1:9180/apisix/admin/routes/1 \
 {
   "uri": "/signed-xml",
   "plugins": {
+    "key-auth": {},
     "xml-signer": {
       "credentials": {
         "certificate": "$secret://vault/signing/xml/certificate",
@@ -191,6 +207,7 @@ curl http://127.0.0.1:9180/apisix/admin/routes/2 \
 {
   "uri": "/signed-xml-without-key-info",
   "plugins": {
+    "key-auth": {},
     "xml-signer": {
       "credentials": {
         "certificate": "$secret://vault/signing/xml/certificate",
@@ -217,16 +234,18 @@ curl http://127.0.0.1:9180/apisix/admin/routes/2 \
 
 ```shell
 curl http://127.0.0.1:9080/signed-xml \
+  -H "apikey: signer-client-key" \
   -H "Content-Type: application/xml" \
   -d '<order xmlns="urn:example"><id>42</id></order>'
 ```
 
-上游会收到一个在文档根元素下带有 enveloped `ds:Signature` 的请求体。请求方法未列入 `request.methods` 时，请求会保持不变并直接转发。
+上游会收到一个在文档根元素下带有 enveloped `ds:Signature` 的请求体。请求方法未列入 `request.methods` 时，请求会保持不变并直接转发。没有有效密钥的请求会在到达本插件之前被 `key-auth` 拒绝。
 
 ## 错误响应
 
 | HTTP 状态码 | 消息 | 原因 |
 | --- | --- | --- |
+| `401` | `unauthorized` | `request.require_consumer` 为 `true`，且请求未被认证插件关联到消费者。 |
 | `400` | `empty_body` | 被选中的请求没有请求体。 |
 | `400` | `invalid_xml` | XML 解析失败、文档的命名空间格式不正确（例如使用了未声明的前缀）、文档没有根元素、存在 DTD/实体声明，或文档超出[限制](#限制)中列出的解析器限制。 |
 | `400` | `already_signed` | 文档已包含 `ds:Signature`。 |
@@ -244,7 +263,7 @@ curl http://127.0.0.1:9080/signed-xml \
 - 不支持分离式签名、XPath 转换、ECDSA、RSA-PSS 或对已签名文档重新签名。
 - 签名前会将整个请求体缓冲到内存或临时请求体文件中；此操作不是流式转换。
 - 为了使解析时间保持线性，如果文档中某个元素的属性（包括命名空间声明）超过 256 个，或同时生效的命名空间声明超过 128 个，插件会拒绝该文档。实际文档远低于这些限制。
-- Exclusive canonicalization 只覆盖元素名和属性名使用的命名空间声明。如果某个前缀只出现在文本或属性值中（例如 `xsi:type="ns:Type"` 中的 `ns`），而从未用于元素名或属性名，则该前缀不受签名保护：修改其绑定不会使签名失效。
+- Exclusive canonicalization 只输出元素名和属性名使用的命名空间声明。如果文档声明的某个前缀只出现在文本或属性值中（例如 `xsi:type="ns:Type"` 中的 `ns`），插件会将其列入 canonicalization 转换的 `ec:InclusiveNamespaces` `PrefixList`，因此修改其绑定会使签名失效。验证方必须支持该参数，它属于 Exclusive XML Canonicalization 规范的一部分。
 - 插件不会强制检查签名证书的有效期。当 APISIX 加载已过期或尚未生效的证书时会记录警告，因为验证方会拒绝此类签名。
 
 ## 故障排查

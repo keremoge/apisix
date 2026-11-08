@@ -57,11 +57,24 @@ __DATA__
                 return value
             end
 
-            local code = t.test('/apisix/admin/routes/1',
+            local code = t.test('/apisix/admin/consumers',
+                ngx.HTTP_PUT,
+                core.json.encode({
+                    username = "xml_signer_client",
+                    plugins = {["key-auth"] = {key = "xml-signer-key"}},
+                })
+            )
+            if code >= 300 then
+                ngx.status = code
+                return
+            end
+
+            code = t.test('/apisix/admin/routes/1',
                 ngx.HTTP_PUT,
                 core.json.encode({
                     uri = "/xml",
                     plugins = {
+                        ["key-auth"] = {},
                         ["proxy-rewrite"] = {uri = "/upstream"},
                         ["xml-signer"] = {
                             credentials = {
@@ -87,13 +100,21 @@ __DATA__
                 local res = assert(http.new():request_uri(
                     "http://127.0.0.1:" .. ngx.var.server_port .. "/xml",
                     {method = method, body = body,
-                     headers = {["Content-Type"] = content_type}}))
+                     headers = {["Content-Type"] = content_type,
+                                apikey = "xml-signer-key"}}))
                 if res.status == 200 then
                     ngx.print(res.status, " ", res.body)
                 else
                     ngx.say(res.status, " ", core.json.decode(res.body).message)
                 end
             end
+
+            -- key-auth rejects the request before xml-signer can sign it
+            local anonymous = assert(http.new():request_uri(
+                "http://127.0.0.1:" .. ngx.var.server_port .. "/xml",
+                {method = "POST", body = "<Order/>",
+                 headers = {["Content-Type"] = "application/xml"}}))
+            ngx.say(anonymous.status)
 
             call("POST", "application/xml",
                  '<Order xmlns="urn:test"><Item>1</Item></Order>')
@@ -124,7 +145,8 @@ __DATA__
                      return string.format("%x\r\n%s\r\n", 8192, string.rep("x", 8192))
                  end,
                  headers = {["Content-Type"] = "application/xml",
-                            ["Transfer-Encoding"] = "chunked"}}))
+                            ["Transfer-Encoding"] = "chunked",
+                            apikey = "xml-signer-key"}}))
             assert(res.status == 413, res.body)
             ngx.say(res.status)
         }
@@ -132,6 +154,7 @@ __DATA__
 --- request
 GET /t
 --- response_body
+401
 200 signatures=1 length_ok=true
 200 signatures=0 length_ok=true
 415 unsupported_media_type
@@ -182,7 +205,8 @@ nginx_config:
                                 certificate = read("t/certs/server.crt"),
                                 private_key = read("t/certs/server.key"),
                             },
-                            request = {max_body_bytes = 16384},
+                            -- the route is not protected by an authentication Plugin
+                            request = {max_body_bytes = 16384, require_consumer = false},
                         },
                     },
                     upstream = {
@@ -219,3 +243,67 @@ GET /t
 413 body_too_large
 --- error_log
 xml-signer failed to read request body: request size 8193 is greater than the maximum size 8192 allowed
+
+
+
+=== TEST 3: refuse to sign without an authenticated Consumer by default
+--- config
+    location /upstream {
+        content_by_lua_block {
+            ngx.say("upstream reached")
+        }
+    }
+    location /t {
+        content_by_lua_block {
+            local t = require("lib.test_admin")
+            local core = require("apisix.core")
+            local http = require("resty.http")
+
+            local function read(path)
+                local file = assert(io.open(path, "rb"))
+                local value = file:read("*a")
+                file:close()
+                return value
+            end
+
+            local code = t.test('/apisix/admin/routes/1',
+                ngx.HTTP_PUT,
+                core.json.encode({
+                    uri = "/xml",
+                    plugins = {
+                        ["proxy-rewrite"] = {uri = "/upstream"},
+                        ["xml-signer"] = {
+                            credentials = {
+                                certificate = read("t/certs/server.crt"),
+                                private_key = read("t/certs/server.key"),
+                            },
+                        },
+                    },
+                    upstream = {
+                        type = "roundrobin",
+                        nodes = {["127.0.0.1:" .. ngx.var.server_port] = 1},
+                    },
+                })
+            )
+            if code >= 300 then
+                ngx.status = code
+                return
+            end
+            ngx.sleep(0.5)
+
+            for _, method in ipairs({"POST", "GET"}) do
+                local res = assert(http.new():request_uri(
+                    "http://127.0.0.1:" .. ngx.var.server_port .. "/xml",
+                    {method = method, body = method == "POST" and "<Order/>" or nil,
+                     headers = {["Content-Type"] = "application/xml"}}))
+                ngx.print(method, " ", res.status, " ", res.body)
+            end
+        }
+    }
+--- request
+GET /t
+--- response_body
+POST 401 {"message":"unauthorized"}
+GET 200 upstream reached
+--- error_log
+xml-signer rejected request: no authenticated Consumer

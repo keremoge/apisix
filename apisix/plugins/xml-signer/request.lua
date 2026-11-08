@@ -162,6 +162,13 @@ function _M.rewrite(plugin_name, conf, ctx, sign)
         return
     end
 
+    -- Secure by default: only an explicit `require_consumer = false` lets
+    -- requests without an authenticated Consumer be signed.
+    if conf.request.require_consumer ~= false and not (ctx and ctx.consumer) then
+        core.log.warn(plugin_name, " rejected request: no authenticated Consumer")
+        return 401, {message = "unauthorized"}
+    end
+
     local headers = ngx.req.get_headers(0)
     local content_encoding = headers["content-encoding"]
     if content_encoding ~= nil

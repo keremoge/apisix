@@ -21,6 +21,10 @@ local byte = string.byte
 local find = string.find
 local gmatch = string.gmatch
 local sub = string.sub
+local ipairs = ipairs
+local table_concat = table.concat
+local table_sort = table.sort
+local tonumber = tonumber
 local type = type
 
 
@@ -582,6 +586,99 @@ function _M.ensure_namespace(doc, node, prefix, href)
 end
 
 
+function _M.new_namespace(node, href, prefix)
+    return C.xmlNewNs(node, xml_char(href), xml_char(prefix))
+end
+
+
+local function pointer_key(pointer)
+    return tonumber(ffi.cast("intptr_t", pointer))
+end
+
+
+local function prefix_token(ns)
+    if ns.prefix == nil then
+        return "#default"
+    end
+    return ffi.string(ns.prefix)
+end
+
+
+-- Exclusive canonicalization only renders namespace declarations that an
+-- element or attribute name uses. A prefix that appears only in content, such
+-- as `xsi:type="ns:Type"`, would otherwise not be covered by the signature.
+-- Returns, sorted, the prefixes ("#default" for the default namespace) of the
+-- declarations in scope at `node` or inside it that no element or attribute
+-- name inside `node` uses, for the InclusiveNamespaces PrefixList.
+function _M.unused_namespace_prefixes(node)
+    local declarations = {}
+    local in_scope = {}
+    local used = {}
+
+    local function add(ns)
+        -- an undeclaration (xmlns="") binds nothing that could be changed
+        if ns.href ~= nil and ns.href[0] ~= 0 then
+            declarations[#declarations + 1] = ns
+        end
+    end
+
+    local function visit(element)
+        local ns = element.nsDef
+        while ns ~= nil do
+            add(ns)
+            ns = ns.next
+        end
+        if element.ns ~= nil then
+            used[pointer_key(element.ns)] = true
+        end
+        local attribute = element.properties
+        while attribute ~= nil do
+            if attribute.ns ~= nil then
+                used[pointer_key(attribute.ns)] = true
+            end
+            attribute = attribute.next
+        end
+    end
+
+    local ns = node.nsDef
+    while ns ~= nil do
+        in_scope[prefix_token(ns)] = true
+        ns = ns.next
+    end
+    local ancestor = node.parent
+    while ancestor ~= nil and ancestor.type == XML_ELEMENT_NODE do
+        ns = ancestor.nsDef
+        while ns ~= nil do
+            local token = prefix_token(ns)
+            if not in_scope[token] then
+                in_scope[token] = true
+                add(ns)
+            end
+            ns = ns.next
+        end
+        ancestor = ancestor.parent
+    end
+    _M.walk(node, visit)
+
+    local seen = {}
+    local prefixes = {}
+    for _, declaration in ipairs(declarations) do
+        local token = prefix_token(declaration)
+        if not used[pointer_key(declaration)] and not seen[token] then
+            seen[token] = true
+            prefixes[#prefixes + 1] = token
+        end
+    end
+    table_sort(prefixes)
+    return prefixes
+end
+
+
+function _M.prefix_list(prefixes)
+    return table_concat(prefixes, " ")
+end
+
+
 function _M.new_child(parent, namespace, local_name, content)
     return C.xmlNewChild(parent, namespace, xml_char(local_name), xml_char(content))
 end
@@ -608,9 +705,18 @@ function _M.content(node)
 end
 
 
-local function canonicalize_document(doc)
+-- `prefixes` is the InclusiveNamespaces PrefixList as a Lua array, or nil.
+local function canonicalize_document(doc, prefixes)
+    local inclusive
+    if prefixes and #prefixes > 0 then
+        -- the Lua strings in `prefixes` stay referenced until the call returns
+        inclusive = ffi.new("xmlChar *[?]", #prefixes + 1)
+        for i, prefix in ipairs(prefixes) do
+            inclusive[i - 1] = ffi.cast("xmlChar *", prefix)
+        end
+    end
     local output = ffi.new("xmlChar *[1]")
-    local length = C.xmlC14NDocDumpMemory(doc, nil, EXCLUSIVE_C14N, nil, 0, output)
+    local length = C.xmlC14NDocDumpMemory(doc, nil, EXCLUSIVE_C14N, inclusive, 0, output)
     if length < 0 or output[0] == nil then
         if output[0] ~= nil then
             C.xmlFree(output[0])
@@ -624,12 +730,15 @@ local function canonicalize_document(doc)
 end
 
 
-function _M.canonicalize_document(doc)
-    return canonicalize_document(doc)
+function _M.canonicalize_document(doc, prefixes)
+    return canonicalize_document(doc, prefixes)
 end
 
 
-function _M.canonicalize(node)
+-- Canonicalize `node` as an apex element. The copy only carries the
+-- namespace declarations that names inside it use, so declarations named in
+-- `prefixes` that are in scope at `node` are added to the copy's root.
+function _M.canonicalize(node, prefixes)
     local doc = C.xmlNewDoc(xml_char("1.0"))
     if doc == nil then
         return nil, "failed to create canonicalization document"
@@ -642,7 +751,26 @@ function _M.canonicalize(node)
     end
     C.xmlDocSetRootElement(doc, copy)
 
-    local result, err = canonicalize_document(doc)
+    for _, token in ipairs(prefixes or {}) do
+        local prefix = token ~= "#default" and token or nil
+        local declared = false
+        local ns = copy.nsDef
+        while ns ~= nil do
+            if prefix_token(ns) == token then
+                declared = true
+                break
+            end
+            ns = ns.next
+        end
+        if not declared then
+            local in_scope = C.xmlSearchNs(node.doc, node, xml_char(prefix))
+            if in_scope ~= nil and in_scope.href ~= nil then
+                C.xmlNewNs(copy, in_scope.href, xml_char(prefix))
+            end
+        end
+    end
+
+    local result, err = canonicalize_document(doc, prefixes)
     C.xmlFreeDoc(doc)
     return result, err
 end

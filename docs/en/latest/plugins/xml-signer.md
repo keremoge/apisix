@@ -47,11 +47,14 @@ Route. The Plugin rejects documents that already contain an XML signature.
 :::caution
 
 The Plugin signs every well-formed XML document that reaches it with the
-configured private key. Anyone who can send requests to the Route can therefore
-obtain signatures from your key. Enable an authentication Plugin, such as
-[`key-auth`](key-auth.md) or [`jwt-auth`](jwt-auth.md), on the Route so that
-only trusted clients can reach the Plugin. Authentication Plugins run before
-`xml-signer`.
+configured private key. By default (`request.require_consumer` is `true`), it
+only signs requests that an authentication Plugin, such as
+[`key-auth`](key-auth.md) or [`jwt-auth`](jwt-auth.md), attributed to a
+Consumer, and answers `401` otherwise. Authentication Plugins run before
+`xml-signer`. An `anonymous_consumer` configured on the authentication Plugin
+also satisfies this check, so do not configure one on signing Routes. Set
+`request.require_consumer` to `false` only when the Route is protected in
+another way, for example by mTLS, `ip-restriction`, or `forward-auth`.
 
 :::
 
@@ -60,16 +63,20 @@ only trusted clients can reach the Plugin. Authentication Plugins run before
 For a matching request, the Plugin performs the following operations during the
 rewrite phase:
 
-1. Buffers the request body up to `request.max_body_bytes`.
-2. Parses the XML with external network access disabled.
-3. Rejects DTD and entity declarations and documents that already contain a
+1. Rejects the request with `401` unless an authentication Plugin attributed
+   it to a Consumer, when `request.require_consumer` is `true`.
+2. Buffers the request body up to `request.max_body_bytes`.
+3. Parses the XML with external network access disabled.
+4. Rejects DTD and entity declarations and documents that already contain a
    `ds:Signature` element.
-4. Applies exclusive XML canonicalization to the document.
-5. Calculates the reference digest selected by `signature.algorithm`.
-6. Creates an enveloped `ds:Signature` under the document root.
-7. Adds X.509 `ds:KeyInfo` unless `signature.key_info` is `none`.
-8. Canonicalizes and signs `ds:SignedInfo` with the configured RSA private key.
-9. Replaces the upstream request body, updates `Content-Length`, and removes
+5. Applies exclusive XML canonicalization to the document. Namespace
+   declarations that no element or attribute name uses are listed in an
+   `ec:InclusiveNamespaces` `PrefixList`, so that they are signed too.
+6. Calculates the reference digest selected by `signature.algorithm`.
+7. Creates an enveloped `ds:Signature` under the document root.
+8. Adds X.509 `ds:KeyInfo` unless `signature.key_info` is `none`.
+9. Canonicalizes and signs `ds:SignedInfo` with the configured RSA private key.
+10. Replaces the upstream request body, updates `Content-Length`, and removes
    body-digest headers that no longer describe the signed body.
 
 The Plugin serializes the body as UTF-8 after signing. Insignificant formatting
@@ -136,6 +143,7 @@ The generated signature has the following structure:
 | `signature.key_info` | string | False | `x509_data` | Key information included in the signature. Use `x509_data` to embed the certificate or `none` to omit `ds:KeyInfo`. |
 | `request.methods` | array[string] | False | `["POST"]` | Request methods to sign. Other methods pass through unchanged. |
 | `request.content_types` | array[string] | False | `["application/xml", "text/xml"]` | Accepted media types. Parameters are ignored except that an explicit non-UTF-8 `charset` is rejected. |
+| `request.require_consumer` | boolean | False | `true` | Sign only requests that an authentication Plugin attributed to a Consumer; other requests receive `401`. Set to `false` only when the Route is protected in another way. |
 | `request.max_body_bytes` | integer | False | `5242880` | Maximum request body size in bytes. Valid range: 1024 to 67108864. The Plugin never raises the limit above a non-zero `nginx_config.http.client_max_body_size` or a `client-control` `max_body_size` configured on the Route; the smaller value applies. |
 
 NOTE: The schema declares `encrypt_fields = {"credentials.private_key"}`.
@@ -232,7 +240,22 @@ Changed environment values require restarting the APISIX Pods.
 
 ## Enable Plugin
 
-The following example enables RSA-SHA256 signing on a Route:
+Create a Consumer that clients authenticate as, for example with
+[`key-auth`](key-auth.md):
+
+```shell
+curl http://127.0.0.1:9180/apisix/admin/consumers \
+  -H "X-API-KEY: $admin_key" -X PUT -d '
+{
+  "username": "signer_client",
+  "plugins": {
+    "key-auth": {"key": "signer-client-key"}
+  }
+}'
+```
+
+The following example enables RSA-SHA256 signing on a Route that requires
+`key-auth`:
 
 ```shell
 curl http://127.0.0.1:9180/apisix/admin/routes/1 \
@@ -240,6 +263,7 @@ curl http://127.0.0.1:9180/apisix/admin/routes/1 \
 {
   "uri": "/signed-xml",
   "plugins": {
+    "key-auth": {},
     "xml-signer": {
       "credentials": {
         "certificate": "$secret://vault/signing/xml/certificate",
@@ -283,6 +307,7 @@ curl http://127.0.0.1:9180/apisix/admin/routes/2 \
 {
   "uri": "/signed-xml-without-key-info",
   "plugins": {
+    "key-auth": {},
     "xml-signer": {
       "credentials": {
         "certificate": "$secret://vault/signing/xml/certificate",
@@ -312,18 +337,21 @@ Send an XML request:
 
 ```shell
 curl http://127.0.0.1:9080/signed-xml \
+  -H "apikey: signer-client-key" \
   -H "Content-Type: application/xml" \
   -d '<order xmlns="urn:example"><id>42</id></order>'
 ```
 
 The upstream receives the body with one enveloped `ds:Signature` under the
 document root. Requests whose method is not listed in `request.methods` pass
-through unchanged.
+through unchanged. Requests without a valid key are rejected by `key-auth`
+before they reach the Plugin.
 
 ## Error Responses
 
 | HTTP status | Message | Cause |
 | --- | --- | --- |
+| `401` | `unauthorized` | `request.require_consumer` is `true` and no authentication Plugin attributed the request to a Consumer. |
 | `400` | `empty_body` | The selected request has no body. |
 | `400` | `invalid_xml` | XML parsing failed, the document is not namespace well-formed (for example, it uses an undeclared prefix), the document has no root, a DTD/entity declaration is present, or the document exceeds the parser limits listed under [Limitations](#limitations). |
 | `400` | `already_signed` | The document already contains a `ds:Signature`. |
@@ -348,11 +376,13 @@ The Plugin does not return detailed cryptographic or request content to clients.
   element has more than 256 attributes (namespace declarations included) or
   more than 128 namespace declarations are in scope at once. Real documents
   stay far below these limits.
-- Exclusive canonicalization only covers namespace declarations that element
-  and attribute names use. A prefix that is used only inside text or
-  attribute values, such as `ns` in `xsi:type="ns:Type"`, and never in an
-  element or attribute name, is not protected by the signature: its binding
-  can change without invalidating it.
+- Exclusive canonicalization only renders namespace declarations that element
+  and attribute names use. When a document declares a prefix that is used only
+  inside text or attribute values, such as `ns` in `xsi:type="ns:Type"`, the
+  Plugin lists it in the `ec:InclusiveNamespaces` `PrefixList` of the
+  canonicalization transform, so that changing its binding invalidates the
+  signature. The verifier must support this parameter, which is part of the
+  Exclusive XML Canonicalization specification.
 - The signing certificate's validity period is not enforced. APISIX logs a
   warning when it loads a certificate that has expired or is not yet valid,
   because verifiers reject such signatures.

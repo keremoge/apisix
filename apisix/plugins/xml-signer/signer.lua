@@ -30,7 +30,7 @@ local _M = {
 
 
 local function build_signature(doc, root, runtime, algorithm, key_info_mode,
-                               digest_value)
+                               digest_value, inclusive_prefixes)
     local ds_ns = xml.ensure_namespace(doc, root, "ds", DS)
     local signature = xml.new_child(root, ds_ns, "Signature")
     local signed_info = xml.new_child(signature, ds_ns, "SignedInfo")
@@ -49,6 +49,11 @@ local function build_signature(doc, root, runtime, algorithm, key_info_mode,
     xml.set_property(enveloped, "Algorithm", ENVELOPED_SIGNATURE)
     local canonicalization = xml.new_child(transforms, ds_ns, "Transform")
     xml.set_property(canonicalization, "Algorithm", EXCLUSIVE_C14N)
+    if #inclusive_prefixes > 0 then
+        local ec_ns = xml.new_namespace(canonicalization, EXCLUSIVE_C14N, "ec")
+        local inclusive = xml.new_child(canonicalization, ec_ns, "InclusiveNamespaces")
+        xml.set_property(inclusive, "PrefixList", xml.prefix_list(inclusive_prefixes))
+    end
 
     local digest_method = xml.new_child(reference, ds_ns, "DigestMethod")
     xml.set_property(digest_method, "Algorithm", algorithm.digest_uri)
@@ -110,8 +115,11 @@ function _M.sign(body, conf, encoding)
         return nil, "credential_error", credential_err
     end
 
+    -- Computed before the ds namespace is added: declarations that no name
+    -- uses are signed through the InclusiveNamespaces PrefixList.
+    local inclusive_prefixes = xml.unused_namespace_prefixes(root)
     xml.ensure_namespace(doc, root, "ds", DS)
-    local canonical, canonical_err = xml.canonicalize_document(doc)
+    local canonical, canonical_err = xml.canonicalize_document(doc, inclusive_prefixes)
     if not canonical then
         xml.free_document(doc)
         return nil, "signing_error", canonical_err
@@ -124,7 +132,7 @@ function _M.sign(body, conf, encoding)
     end
 
     local signature, signature_err = build_signature(
-        doc, root, runtime, algorithm, key_info_mode, digest_value)
+        doc, root, runtime, algorithm, key_info_mode, digest_value, inclusive_prefixes)
     if not signature then
         xml.free_document(doc)
         return nil, "signing_error", signature_err
