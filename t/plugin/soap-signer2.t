@@ -57,11 +57,24 @@ __DATA__
                 return value
             end
 
-            local code = t.test('/apisix/admin/routes/1',
+            local code = t.test('/apisix/admin/consumers',
+                ngx.HTTP_PUT,
+                core.json.encode({
+                    username = "soap_signer_client",
+                    plugins = {["key-auth"] = {key = "soap-signer-key"}},
+                })
+            )
+            if code >= 300 then
+                ngx.status = code
+                return
+            end
+
+            code = t.test('/apisix/admin/routes/1',
                 ngx.HTTP_PUT,
                 core.json.encode({
                     uri = "/soap",
                     plugins = {
+                        ["key-auth"] = {},
                         ["proxy-rewrite"] = {uri = "/upstream"},
                         ["soap-signer"] = {
                             credentials = {
@@ -87,13 +100,21 @@ __DATA__
                 local res = assert(http.new():request_uri(
                     "http://127.0.0.1:" .. ngx.var.server_port .. "/soap",
                     {method = method, body = body,
-                     headers = {["Content-Type"] = content_type}}))
+                     headers = {["Content-Type"] = content_type,
+                                apikey = "soap-signer-key"}}))
                 if res.status == 200 then
                     ngx.print(res.status, " ", res.body)
                 else
                     ngx.say(res.status, " ", core.json.decode(res.body).message)
                 end
             end
+
+            -- key-auth rejects the request before soap-signer can sign it
+            local anonymous = assert(http.new():request_uri(
+                "http://127.0.0.1:" .. ngx.var.server_port .. "/soap",
+                {method = "POST", body = "<s:Envelope/>",
+                 headers = {["Content-Type"] = "text/xml"}}))
+            ngx.say(anonymous.status)
 
             call("POST", "text/xml", '<s:Envelope xmlns:s="'
                  .. 'http://schemas.xmlsoap.org/soap/envelope/">'
@@ -115,6 +136,7 @@ __DATA__
 --- request
 GET /t
 --- response_body
+401
 200 signatures=1 length_ok=true
 200 signatures=0 length_ok=true
 415 unsupported_media_type
@@ -164,7 +186,8 @@ nginx_config:
                                 certificate = read("t/certs/server.crt"),
                                 private_key = read("t/certs/server.key"),
                             },
-                            request = {max_body_bytes = 16384},
+                            -- the route is not protected by an authentication Plugin
+                            request = {max_body_bytes = 16384, require_consumer = false},
                         },
                     },
                     upstream = {
@@ -235,3 +258,67 @@ GET /t
 --- error_log
 soap-signer failed to read request body: request size 8193 is greater than the maximum size 8192 allowed
 client intended to send too large chunked body
+
+
+
+=== TEST 3: refuse to sign without an authenticated Consumer by default
+--- config
+    location /upstream {
+        content_by_lua_block {
+            ngx.say("upstream reached")
+        }
+    }
+    location /t {
+        content_by_lua_block {
+            local t = require("lib.test_admin")
+            local core = require("apisix.core")
+            local http = require("resty.http")
+
+            local function read(path)
+                local file = assert(io.open(path, "rb"))
+                local value = file:read("*a")
+                file:close()
+                return value
+            end
+
+            local code = t.test('/apisix/admin/routes/1',
+                ngx.HTTP_PUT,
+                core.json.encode({
+                    uri = "/soap",
+                    plugins = {
+                        ["proxy-rewrite"] = {uri = "/upstream"},
+                        ["soap-signer"] = {
+                            credentials = {
+                                certificate = read("t/certs/server.crt"),
+                                private_key = read("t/certs/server.key"),
+                            },
+                        },
+                    },
+                    upstream = {
+                        type = "roundrobin",
+                        nodes = {["127.0.0.1:" .. ngx.var.server_port] = 1},
+                    },
+                })
+            )
+            if code >= 300 then
+                ngx.status = code
+                return
+            end
+            ngx.sleep(0.5)
+
+            for _, method in ipairs({"POST", "GET"}) do
+                local res = assert(http.new():request_uri(
+                    "http://127.0.0.1:" .. ngx.var.server_port .. "/soap",
+                    {method = method, body = method == "POST" and "<s:Envelope/>" or nil,
+                     headers = {["Content-Type"] = "text/xml"}}))
+                ngx.print(method, " ", res.status, " ", res.body)
+            end
+        }
+    }
+--- request
+GET /t
+--- response_body
+POST 401 {"message":"unauthorized"}
+GET 200 upstream reached
+--- error_log
+soap-signer rejected request: no authenticated Consumer

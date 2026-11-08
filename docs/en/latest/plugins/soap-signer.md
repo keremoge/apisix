@@ -46,11 +46,14 @@ Route. The Plugin rejects messages that already contain an XML signature.
 :::caution
 
 The Plugin signs every well-formed SOAP message that reaches it with the
-configured private key. Anyone who can send requests to the Route can therefore
-obtain signatures from your key. Enable an authentication Plugin, such as
-[`key-auth`](key-auth.md) or [`jwt-auth`](jwt-auth.md), on the Route so that
-only trusted clients can reach the Plugin. Authentication Plugins run before
-`soap-signer`.
+configured private key. By default (`request.require_consumer` is `true`), it
+only signs requests that an authentication Plugin, such as
+[`key-auth`](key-auth.md) or [`jwt-auth`](jwt-auth.md), attributed to a
+Consumer, and answers `401` otherwise. Authentication Plugins run before
+`soap-signer`. An `anonymous_consumer` configured on the authentication Plugin
+also satisfies this check, so do not configure one on signing Routes. Set
+`request.require_consumer` to `false` only when the Route is protected in
+another way, for example by mTLS, `ip-restriction`, or `forward-auth`.
 
 :::
 
@@ -59,20 +62,26 @@ only trusted clients can reach the Plugin. Authentication Plugins run before
 For a matching request, the Plugin performs the following operations during the
 rewrite phase:
 
-1. Buffers and parses the SOAP XML with external network access disabled.
-2. Detects SOAP 1.1 or SOAP 1.2 from the Envelope namespace and validates it
+1. Rejects the request with `401` unless an authentication Plugin attributed
+   it to a Consumer, when `request.require_consumer` is `true`.
+2. Buffers and parses the SOAP XML with external network access disabled.
+3. Detects SOAP 1.1 or SOAP 1.2 from the Envelope namespace and validates it
    against `soap.version`.
-3. Preserves an existing SOAP Header, which must precede the Body, or creates
+4. Preserves an existing SOAP Header, which must precede the Body, or creates
    one before the Body.
-4. Creates or reuses `wsse:Security` and sets the SOAP `mustUnderstand`
-   attribute. A reused header must not already contain a `wsu:Timestamp`.
-5. Assigns a `wsu:Id` to the Body when it does not already have one.
-6. Creates a UTC Timestamp with `Created`, `Expires`, and a unique `wsu:Id`.
-7. Embeds the X.509 certificate in a `wsse:BinarySecurityToken` unless
+5. Creates or reuses `wsse:Security` and sets the SOAP `mustUnderstand`
+   attribute. A reused header must be empty unless
+   `soap.allow_existing_security_content` is `true`, and must never already
+   contain a `wsu:Timestamp`.
+6. Assigns a `wsu:Id` to the Body when it does not already have one.
+7. Creates a UTC Timestamp with `Created`, `Expires`, and a unique `wsu:Id`.
+8. Embeds the X.509 certificate in a `wsse:BinarySecurityToken` unless
    `signature.key_info` is `none`.
-8. Calculates a digest for both the Body and Timestamp using the algorithm
-   selected by `signature.algorithm`.
-9. Signs canonicalized `ds:SignedInfo`, replaces the upstream request body,
+9. Calculates a digest for both the Body and Timestamp using the algorithm
+   selected by `signature.algorithm`. Namespace declarations that no element
+   or attribute name in the Body uses are listed in an
+   `ec:InclusiveNamespaces` `PrefixList`, so that they are signed too.
+10. Signs canonicalized `ds:SignedInfo`, replaces the upstream request body,
    updates `Content-Length`, and removes body-digest headers that no longer
    describe the signed body.
 
@@ -138,9 +147,11 @@ The generated security header has this general structure:
 | `signature.key_info` | string | False | `binary_security_token` | Key information mode. Use `binary_security_token` for a direct X.509 token reference or `none` to omit both `ds:KeyInfo` and the token. |
 | `soap.version` | string | False | `auto` | SOAP version: `auto`, `1.1`, or `1.2`. |
 | `soap.must_understand` | boolean | False | `true` | Value of the SOAP `mustUnderstand` attribute on the Security header. |
+| `soap.allow_existing_security_content` | boolean | False | `false` | Allow reusing a `wsse:Security` header that already has content, such as a client `wsse:UsernameToken`. That content is not covered by the signature. When `false`, a reused header must be empty. |
 | `timestamp.ttl_seconds` | integer | False | `300` | Timestamp lifetime. Valid range: 1 to 86400 seconds. |
 | `request.methods` | array[string] | False | `["POST"]` | Request methods to sign. Other methods pass through unchanged. |
 | `request.content_types` | array[string] | False | `["text/xml", "application/soap+xml", "application/xml"]` | Accepted media types. An explicit non-UTF-8 `charset` is rejected. |
+| `request.require_consumer` | boolean | False | `true` | Sign only requests that an authentication Plugin attributed to a Consumer; other requests receive `401`. Set to `false` only when the Route is protected in another way. |
 | `request.max_body_bytes` | integer | False | `5242880` | Maximum request body size in bytes. Valid range: 1024 to 67108864. The Plugin never raises the limit above a non-zero `nginx_config.http.client_max_body_size` or a `client-control` `max_body_size` configured on the Route; the smaller value applies. |
 
 NOTE: The schema declares `encrypt_fields = {"credentials.private_key"}`.
@@ -243,7 +254,22 @@ Changed environment values require restarting the APISIX Pods.
 
 ## Enable Plugin
 
-The following example enables SOAP version auto-detection and RSA-SHA256:
+Create a Consumer that clients authenticate as, for example with
+[`key-auth`](key-auth.md):
+
+```shell
+curl http://127.0.0.1:9180/apisix/admin/consumers \
+  -H "X-API-KEY: $admin_key" -X PUT -d '
+{
+  "username": "signer_client",
+  "plugins": {
+    "key-auth": {"key": "signer-client-key"}
+  }
+}'
+```
+
+The following example enables SOAP version auto-detection and RSA-SHA256 on a
+Route that requires `key-auth`:
 
 ```shell
 curl http://127.0.0.1:9180/apisix/admin/routes/1 \
@@ -251,6 +277,7 @@ curl http://127.0.0.1:9180/apisix/admin/routes/1 \
 {
   "uri": "/signed-soap",
   "plugins": {
+    "key-auth": {},
     "soap-signer": {
       "credentials": {
         "certificate": "$secret://vault/signing/soap/certificate",
@@ -297,6 +324,7 @@ curl http://127.0.0.1:9180/apisix/admin/routes/2 \
 {
   "uri": "/signed-soap-without-key-info",
   "plugins": {
+    "key-auth": {},
     "soap-signer": {
       "credentials": {
         "certificate": "$secret://vault/signing/soap/certificate",
@@ -328,6 +356,7 @@ Send a SOAP 1.2 request:
 
 ```shell
 curl http://127.0.0.1:9080/signed-soap \
+  -H "apikey: signer-client-key" \
   -H "Content-Type: application/soap+xml" \
   -d '<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Body><Ping/></s:Body></s:Envelope>'
 ```
@@ -336,20 +365,23 @@ For SOAP 1.1, use `Content-Type: text/xml` and the SOAP 1.1 Envelope namespace:
 
 ```shell
 curl http://127.0.0.1:9080/signed-soap \
+  -H "apikey: signer-client-key" \
   -H "Content-Type: text/xml; charset=utf-8" \
   -d '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><Ping/></s:Body></s:Envelope>'
 ```
 
 The upstream receives the original SOAP message with a signed WS-Security
 header. Requests whose method is not listed in `request.methods` pass through
-unchanged.
+unchanged. Requests without a valid key are rejected by `key-auth` before they
+reach the Plugin.
 
 ## Error Responses
 
 | HTTP status | Message | Cause |
 | --- | --- | --- |
+| `401` | `unauthorized` | `request.require_consumer` is `true` and no authentication Plugin attributed the request to a Consumer. |
 | `400` | `empty_body` | The selected request has no body. |
-| `400` | `invalid_soap` | XML parsing failed, Body is absent or duplicated, Header is duplicated or follows the Body, recognized XML ID values (`wsu:Id`, `xml:id`, and unqualified `Id`) are invalid or duplicated, the `wsse:Security` header already contains a `wsu:Timestamp`, a DTD/entity declaration is present, or the message exceeds the parser limits listed under [Limitations](#limitations). |
+| `400` | `invalid_soap` | XML parsing failed, Body is absent or duplicated, Header is duplicated or follows the Body, recognized XML ID values (`wsu:Id`, `xml:id`, and unqualified `Id`) are invalid or duplicated, the reused `wsse:Security` header already has content while `soap.allow_existing_security_content` is `false` or already contains a `wsu:Timestamp`, a DTD/entity declaration is present, or the message exceeds the parser limits listed under [Limitations](#limitations). |
 | `400` | `not_soap` | The root is not a supported SOAP Envelope or does not match `soap.version`. |
 | `400` | `already_signed` | The message already contains a `ds:Signature`. |
 | `413` | `body_too_large` | The body exceeds the effective body size limit (see `request.max_body_bytes`). |
@@ -373,14 +405,17 @@ The Plugin does not return detailed cryptographic or request content to clients.
   element has more than 256 attributes (namespace declarations included) or
   more than 128 namespace declarations are in scope at once. Real messages
   stay far below these limits.
-- Content that a reused `wsse:Security` header already contains, such as a
-  client-supplied `wsse:UsernameToken`, is not covered by the signature.
-  Services must not treat such content as vouched for by APISIX.
-- Exclusive canonicalization only covers namespace declarations that element
-  and attribute names use. A prefix that is used only inside text or
-  attribute values, such as `ns` in `xsi:type="ns:Type"`, and never in an
-  element or attribute name, is not protected by the signature: its binding
-  can change without invalidating it.
+- When `soap.allow_existing_security_content` is `true`, content that a reused
+  `wsse:Security` header already contains, such as a client-supplied
+  `wsse:UsernameToken`, is not covered by the signature. Services must not
+  treat such content as vouched for by APISIX.
+- Exclusive canonicalization only renders namespace declarations that element
+  and attribute names use. When the Body uses a prefix only inside text or
+  attribute values, such as `ns` in `xsi:type="ns:Type"`, the Plugin lists it
+  in the `ec:InclusiveNamespaces` `PrefixList` of the Body reference, so that
+  changing its binding invalidates the signature. The verifier must support
+  this parameter, which is part of the Exclusive XML Canonicalization
+  specification.
 - The signing certificate's validity period is not enforced. APISIX logs a
   warning when it loads a certificate that has expired or is not yet valid,
   because verifiers reject such signatures.

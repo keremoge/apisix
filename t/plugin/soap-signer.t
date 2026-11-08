@@ -448,7 +448,9 @@ routes: []
                     certificate = read("t/certs/server.crt"),
                     private_key = read("t/certs/server.key"),
                 },
-                soap = {version = "auto", must_understand = true},
+                -- this test covers reusing a header that already has content
+                soap = {version = "auto", must_understand = true,
+                        allow_existing_security_content = true},
                 timestamp = {ttl_seconds = 300},
             }
             local function envelope(security)
@@ -653,7 +655,8 @@ routes: []
                     certificate = read("t/certs/server.crt"),
                     private_key = read("t/certs/server.key"),
                 },
-                soap = {version = "auto", must_understand = true},
+                soap = {version = "auto", must_understand = true,
+                        allow_existing_security_content = true},
                 timestamp = {ttl_seconds = 300},
             }, 1790856000))
 
@@ -679,7 +682,8 @@ routes: []
                     certificate = read("t/certs/server.crt"),
                     private_key = read("t/certs/server.key"),
                 },
-                soap = {version = "auto", must_understand = true},
+                soap = {version = "auto", must_understand = true,
+                        allow_existing_security_content = true},
                 timestamp = {ttl_seconds = 300},
             }, 1790856000))
             doc = assert(xml.parse(signed))
@@ -922,3 +926,163 @@ GET /t
 mustUnderstand=1
 Created=2026-10-01T12:00:00Z
 Expires=2026-10-01T12:05:00Z
+
+
+
+=== TEST 15: reuse only an empty wsse:Security header by default
+--- apisix_yaml
+routes: []
+#END
+--- config
+    location /t {
+        content_by_lua_block {
+            local signer = require("apisix.plugins.soap-signer.signer")
+            local xml = require("apisix.plugins.soap-signer.xml")
+            local ns = signer.namespaces
+
+            local function read(path)
+                local file = assert(io.open(path, "rb"))
+                local value = file:read("*a")
+                file:close()
+                return value
+            end
+
+            local function conf(allow)
+                return {
+                    credentials = {
+                        certificate = read("t/certs/server.crt"),
+                        private_key = read("t/certs/server.key"),
+                    },
+                    soap = {version = "auto", must_understand = true,
+                            allow_existing_security_content = allow},
+                    timestamp = {ttl_seconds = 300},
+                }
+            end
+            local function envelope(security)
+                return string.format(
+                    '<s:Envelope xmlns:s="%s" xmlns:wsse="%s"><s:Header>'
+                    .. '<wsse:Security>%s</wsse:Security></s:Header>'
+                    .. '<s:Body><Ping/></s:Body></s:Envelope>', ns.soap11, ns.wsse, security)
+            end
+            local token = "<wsse:UsernameToken><wsse:Username>admin</wsse:Username>"
+                          .. "</wsse:UsernameToken>"
+
+            for _, case in ipairs({
+                {"token, default", token, nil},
+                {"text, default", "unexpected", nil},
+                {"token, allowed", token, true},
+                {"empty, default", "", nil},
+                {"whitespace and comment, default", "\n  <!-- client -->\n", nil},
+            }) do
+                local signed, code, detail = signer.sign(envelope(case[2]), conf(case[3]),
+                                                         1790856000)
+                if signed then
+                    local doc = assert(xml.parse(signed))
+                    local root = assert(xml.root(doc))
+                    ngx.say(case[1], ": signed, ", #xml.find_all(root, ns.wsse, "Security"),
+                            " Security header")
+                    xml.free_document(doc)
+                else
+                    ngx.say(case[1], ": ", code, " ", detail)
+                end
+            end
+        }
+    }
+--- request
+GET /t
+--- response_body
+token, default: invalid_soap wsse:Security header already has content
+text, default: invalid_soap wsse:Security header already has content
+token, allowed: signed, 1 Security header
+empty, default: signed, 1 Security header
+whitespace and comment, default: signed, 1 Security header
+
+
+
+=== TEST 16: sign Body namespace declarations used only in content with InclusiveNamespaces
+--- apisix_yaml
+routes: []
+#END
+--- config
+    location /t {
+        content_by_lua_block {
+            local digest = require("resty.openssl.digest")
+            local signer = require("apisix.plugins.soap-signer.signer")
+            local xml = require("apisix.plugins.soap-signer.xml")
+            local ns = signer.namespaces
+            local exclusive = "http://www.w3.org/2001/10/xml-exc-c14n#"
+
+            local function read(path)
+                local file = assert(io.open(path, "rb"))
+                local value = file:read("*a")
+                file:close()
+                return value
+            end
+
+            local conf = {
+                credentials = {
+                    certificate = read("t/certs/server.crt"),
+                    private_key = read("t/certs/server.key"),
+                },
+                soap = {version = "auto", must_understand = true},
+                timestamp = {ttl_seconds = 300},
+            }
+            local function sha256(value)
+                local context = assert(digest.new("sha256"))
+                assert(context:update(value))
+                return ngx.encode_base64(assert(context:final()))
+            end
+            -- returns the Body reference's PrefixList, and whether its digest
+            -- matches a recomputation of the (possibly modified) message
+            local function check(signed)
+                local doc = assert(xml.parse(signed))
+                local root = assert(xml.root(doc))
+                local body = assert(xml.find_child(root, ns.soap11, "Body"))
+                local body_id = xml.get_namespaced_property(body, ns.wsu, "Id")
+                local prefix_list, matches
+                for _, reference in ipairs(xml.find_all(root, ns.ds, "Reference")) do
+                    if xml.get_property(reference, "URI") == "#" .. body_id then
+                        local inclusive = xml.find_all(reference, exclusive,
+                                                       "InclusiveNamespaces")[1]
+                        prefix_list = inclusive and xml.get_property(inclusive, "PrefixList")
+                        local prefixes = {}
+                        for prefix in (prefix_list or ""):gmatch("%S+") do
+                            prefixes[#prefixes + 1] = prefix
+                        end
+                        local expected = xml.content(
+                            assert(xml.find_child(reference, ns.ds, "DigestValue")))
+                        matches = sha256(assert(xml.canonicalize(body, prefixes))) == expected
+                    end
+                end
+                xml.free_document(doc)
+                return prefix_list, matches
+            end
+
+            -- "xsd" is only used inside an attribute value
+            local signed = assert(signer.sign(
+                '<s:Envelope xmlns:s="' .. ns.soap11 .. '"'
+                .. ' xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"'
+                .. ' xmlns:xsd="http://www.w3.org/2001/XMLSchema">'
+                .. '<s:Body><Id xmlns="urn:e2e" xsi:type="xsd:string">42</Id></s:Body>'
+                .. '</s:Envelope>', conf, 1790856000))
+            local prefix_list, matches = check(signed)
+            ngx.say("PrefixList=", prefix_list, " digest matches: ", matches)
+            local rebound = signed:gsub('xmlns:xsd="http://www.w3.org/2001/XMLSchema"',
+                                        'xmlns:xsd="urn:attacker"')
+            local _, rebound_matches = check(rebound)
+            ngx.say("rebound digest matches: ", rebound_matches)
+
+            -- when every declaration is used, the output is unchanged
+            signed = assert(signer.sign(
+                '<s:Envelope xmlns:s="' .. ns.soap11 .. '"><s:Body><p:Ping xmlns:p="urn:p"/>'
+                .. '</s:Body></s:Envelope>', conf, 1790856000))
+            prefix_list, matches = check(signed)
+            ngx.say("PrefixList=", tostring(prefix_list), " digest matches: ", matches)
+        }
+    }
+--- request
+GET /t
+--- response_body
+PrefixList=xsd digest matches: true
+rebound digest matches: false
+PrefixList=nil digest matches: true

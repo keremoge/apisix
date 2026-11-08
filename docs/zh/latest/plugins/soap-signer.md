@@ -38,7 +38,7 @@ description: soap-signer 插件使用 X.509 WS-Security 签名为 SOAP 请求体
 
 :::caution
 
-插件会使用配置的私钥为到达它的每个格式正确的 SOAP 消息签名。因此，任何能够向该路由发送请求的客户端都可以获得由你的私钥生成的签名。请在路由上启用认证插件（例如 [`key-auth`](key-auth.md) 或 [`jwt-auth`](jwt-auth.md)），确保只有可信客户端能够访问本插件。认证插件会在 `soap-signer` 之前执行。
+插件会使用配置的私钥为到达它的每个格式正确的 SOAP 消息签名。默认情况下（`request.require_consumer` 为 `true`），插件只为已由认证插件（例如 [`key-auth`](key-auth.md) 或 [`jwt-auth`](jwt-auth.md)）关联到消费者的请求签名，否则返回 `401`。认证插件会在 `soap-signer` 之前执行。认证插件上配置的 `anonymous_consumer` 同样满足此检查，因此不要在签名路由上配置匿名消费者。只有当路由已通过其他方式受到保护（例如 mTLS、`ip-restriction` 或 `forward-auth`）时，才应将 `request.require_consumer` 设置为 `false`。
 
 :::
 
@@ -46,15 +46,16 @@ description: soap-signer 插件使用 X.509 WS-Security 签名为 SOAP 请求体
 
 匹配的请求在 rewrite 阶段会依次执行以下操作：
 
-1. 在禁用外部网络访问的情况下缓冲并解析 SOAP XML。
-2. 根据 Envelope 命名空间识别 SOAP 1.1 或 SOAP 1.2，并按照 `soap.version` 验证版本。
-3. 保留已有的 SOAP Header（必须位于 Body 之前）；若不存在，则在 Body 前创建。
-4. 创建或复用 `wsse:Security`，并设置 SOAP `mustUnderstand` 属性；被复用的标头不得已经包含 `wsu:Timestamp`。
-5. 如果 Body 尚无 `wsu:Id`，则为其分配 ID。
-6. 创建包含 `Created`、`Expires` 和唯一 `wsu:Id` 的 UTC Timestamp。
-7. 除非 `signature.key_info` 为 `none`，否则在 `wsse:BinarySecurityToken` 中嵌入 X.509 证书。
-8. 使用 `signature.algorithm` 指定的算法分别计算 Body 和 Timestamp 的摘要。
-9. 对 canonicalized `ds:SignedInfo` 签名，替换发往上游的请求体、更新 `Content-Length`，并移除不再对应签名后请求体的摘要标头。
+1. 当 `request.require_consumer` 为 `true` 时，如果请求未被认证插件关联到消费者，则返回 `401`。
+2. 在禁用外部网络访问的情况下缓冲并解析 SOAP XML。
+3. 根据 Envelope 命名空间识别 SOAP 1.1 或 SOAP 1.2，并按照 `soap.version` 验证版本。
+4. 保留已有的 SOAP Header（必须位于 Body 之前）；若不存在，则在 Body 前创建。
+5. 创建或复用 `wsse:Security`，并设置 SOAP `mustUnderstand` 属性；除非 `soap.allow_existing_security_content` 为 `true`，否则被复用的标头必须为空，并且在任何情况下都不得已经包含 `wsu:Timestamp`。
+6. 如果 Body 尚无 `wsu:Id`，则为其分配 ID。
+7. 创建包含 `Created`、`Expires` 和唯一 `wsu:Id` 的 UTC Timestamp。
+8. 除非 `signature.key_info` 为 `none`，否则在 `wsse:BinarySecurityToken` 中嵌入 X.509 证书。
+9. 使用 `signature.algorithm` 指定的算法分别计算 Body 和 Timestamp 的摘要。Body 中没有被任何元素名或属性名使用的命名空间声明会列入 `ec:InclusiveNamespaces` 的 `PrefixList`，从而同样受签名保护。
+10. 对 canonicalized `ds:SignedInfo` 签名，替换发往上游的请求体、更新 `Content-Length`，并移除不再对应签名后请求体的摘要标头。
 
 请求体会以 UTF-8 序列化。显式声明非 UTF-8 `charset` 的请求会被拒绝。
 
@@ -104,9 +105,11 @@ description: soap-signer 插件使用 X.509 WS-Security 签名为 SOAP 请求体
 | `signature.key_info` | string | 否 | `binary_security_token` | 密钥信息模式。使用 `binary_security_token` 直接引用 X.509 令牌，或使用 `none` 同时省略 `ds:KeyInfo` 和令牌。 |
 | `soap.version` | string | 否 | `auto` | SOAP 版本：`auto`、`1.1` 或 `1.2`。 |
 | `soap.must_understand` | boolean | 否 | `true` | Security 标头中 SOAP `mustUnderstand` 属性的值。 |
+| `soap.allow_existing_security_content` | boolean | 否 | `false` | 允许复用已有内容的 `wsse:Security` 标头，例如客户端提供的 `wsse:UsernameToken`。这些内容不受签名保护。为 `false` 时，被复用的标头必须为空。 |
 | `timestamp.ttl_seconds` | integer | 否 | `300` | Timestamp 有效期，有效范围为 1 到 86400 秒。 |
 | `request.methods` | array[string] | 否 | `["POST"]` | 要签名的请求方法。其他方法的请求保持不变并直接转发。 |
 | `request.content_types` | array[string] | 否 | `["text/xml", "application/soap+xml", "application/xml"]` | 接受的媒体类型；显式声明非 UTF-8 `charset` 的请求会被拒绝。 |
+| `request.require_consumer` | boolean | 否 | `true` | 只为已由认证插件关联到消费者的请求签名，其他请求返回 `401`。只有当路由已通过其他方式受到保护时才设置为 `false`。 |
 | `request.max_body_bytes` | integer | 否 | `5242880` | 请求体最大字节数，有效范围为 1024 到 67108864。插件不会将限制提高到非零的 `nginx_config.http.client_max_body_size` 或路由上 `client-control` 配置的 `max_body_size` 之上，以较小值为准。 |
 
 注意：schema 中定义了 `encrypt_fields = {"credentials.private_key"}`。只有启用 `apisix.data_encryption.enable_encrypt_fields` 并配置有效的 keyring 时，直接配置的私钥才会在 etcd 中加密；独立模式的 YAML 配置不会被加密。建议使用 [APISIX Secret](../terminology/secret.md) 引用，避免密钥材料保存在路由配置中。
@@ -155,7 +158,20 @@ APISIX 会在插件执行前解析引用。解析后的凭据会在每个 worker
 
 ## 启用插件
 
-以下示例启用 SOAP 版本自动检测和 RSA-SHA256：
+创建客户端用于认证的消费者，例如使用 [`key-auth`](key-auth.md)：
+
+```shell
+curl http://127.0.0.1:9180/apisix/admin/consumers \
+  -H "X-API-KEY: $admin_key" -X PUT -d '
+{
+  "username": "signer_client",
+  "plugins": {
+    "key-auth": {"key": "signer-client-key"}
+  }
+}'
+```
+
+以下示例在要求 `key-auth` 的路由上启用 SOAP 版本自动检测和 RSA-SHA256：
 
 ```shell
 curl http://127.0.0.1:9180/apisix/admin/routes/1 \
@@ -163,6 +179,7 @@ curl http://127.0.0.1:9180/apisix/admin/routes/1 \
 {
   "uri": "/signed-soap",
   "plugins": {
+    "key-auth": {},
     "soap-signer": {
       "credentials": {
         "certificate": "$secret://vault/signing/soap/certificate",
@@ -204,6 +221,7 @@ curl http://127.0.0.1:9180/apisix/admin/routes/2 \
 {
   "uri": "/signed-soap-without-key-info",
   "plugins": {
+    "key-auth": {},
     "soap-signer": {
       "credentials": {
         "certificate": "$secret://vault/signing/soap/certificate",
@@ -232,6 +250,7 @@ curl http://127.0.0.1:9180/apisix/admin/routes/2 \
 
 ```shell
 curl http://127.0.0.1:9080/signed-soap \
+  -H "apikey: signer-client-key" \
   -H "Content-Type: application/soap+xml" \
   -d '<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Body><Ping/></s:Body></s:Envelope>'
 ```
@@ -240,18 +259,20 @@ curl http://127.0.0.1:9080/signed-soap \
 
 ```shell
 curl http://127.0.0.1:9080/signed-soap \
+  -H "apikey: signer-client-key" \
   -H "Content-Type: text/xml; charset=utf-8" \
   -d '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><Ping/></s:Body></s:Envelope>'
 ```
 
-上游会收到包含已签名 WS-Security 标头的原始 SOAP 消息。请求方法未列入 `request.methods` 时，请求会保持不变并直接转发。
+上游会收到包含已签名 WS-Security 标头的原始 SOAP 消息。请求方法未列入 `request.methods` 时，请求会保持不变并直接转发。没有有效密钥的请求会在到达本插件之前被 `key-auth` 拒绝。
 
 ## 错误响应
 
 | HTTP 状态码 | 消息 | 原因 |
 | --- | --- | --- |
+| `401` | `unauthorized` | `request.require_consumer` 为 `true`，且请求未被认证插件关联到消费者。 |
 | `400` | `empty_body` | 被选中的请求没有请求体。 |
-| `400` | `invalid_soap` | XML 解析失败、Body 缺失或重复、Header 重复或位于 Body 之后、XML ID（`wsu:Id`、`xml:id` 和无命名空间的 `Id`）无效或重复、`wsse:Security` 标头已包含 `wsu:Timestamp`、存在 DTD/实体声明，或消息超出[限制](#限制)中列出的解析器限制。 |
+| `400` | `invalid_soap` | XML 解析失败、Body 缺失或重复、Header 重复或位于 Body 之后、XML ID（`wsu:Id`、`xml:id` 和无命名空间的 `Id`）无效或重复、被复用的 `wsse:Security` 标头在 `soap.allow_existing_security_content` 为 `false` 时已有内容或已包含 `wsu:Timestamp`、存在 DTD/实体声明，或消息超出[限制](#限制)中列出的解析器限制。 |
 | `400` | `not_soap` | 根元素不是受支持的 SOAP Envelope，或与 `soap.version` 不匹配。 |
 | `400` | `already_signed` | 消息已包含 `ds:Signature`。 |
 | `413` | `body_too_large` | 请求体超过生效的请求体大小限制（参见 `request.max_body_bytes`）。 |
@@ -268,8 +289,8 @@ curl http://127.0.0.1:9080/signed-soap \
 - 不支持 Actor/Role 定向、thumbprint 引用、ECDSA、RSA-PSS 或替换已有签名。
 - 签名前会缓冲整个请求体；此操作不是流式签名。
 - 为了使解析时间保持线性，如果消息中某个元素的属性（包括命名空间声明）超过 256 个，或同时生效的命名空间声明超过 128 个，插件会拒绝该消息。实际消息远低于这些限制。
-- 被复用的 `wsse:Security` 标头中已有的内容（例如客户端提供的 `wsse:UsernameToken`）不受签名保护。服务不得将此类内容视为由 APISIX 担保。
-- Exclusive canonicalization 只覆盖元素名和属性名使用的命名空间声明。如果某个前缀只出现在文本或属性值中（例如 `xsi:type="ns:Type"` 中的 `ns`），而从未用于元素名或属性名，则该前缀不受签名保护：修改其绑定不会使签名失效。
+- 当 `soap.allow_existing_security_content` 为 `true` 时，被复用的 `wsse:Security` 标头中已有的内容（例如客户端提供的 `wsse:UsernameToken`）不受签名保护。服务不得将此类内容视为由 APISIX 担保。
+- Exclusive canonicalization 只输出元素名和属性名使用的命名空间声明。如果 Body 中的某个前缀只出现在文本或属性值中（例如 `xsi:type="ns:Type"` 中的 `ns`），插件会将其列入 Body 引用的 `ec:InclusiveNamespaces` `PrefixList`，因此修改其绑定会使签名失效。验证方必须支持该参数，它属于 Exclusive XML Canonicalization 规范的一部分。
 - 插件不会强制检查签名证书的有效期。当 APISIX 加载已过期或尚未生效的证书时会记录警告，因为验证方会拒绝此类签名。
 
 ## 故障排查

@@ -170,6 +170,13 @@ function _M.rewrite(plugin_name, conf, ctx, sign)
         return
     end
 
+    -- Secure by default: only an explicit `require_consumer = false` lets
+    -- requests without an authenticated Consumer be signed.
+    if conf.request.require_consumer ~= false and not (ctx and ctx.consumer) then
+        core.log.warn(plugin_name, " rejected request: no authenticated Consumer")
+        return 401, {message = "unauthorized"}
+    end
+
     -- Read every header: core.request.headers() stops after
     -- `max_req_headers` (100 by default), which would let a client hide a
     -- Content-Encoding or a repeated Content-Type behind padding headers.

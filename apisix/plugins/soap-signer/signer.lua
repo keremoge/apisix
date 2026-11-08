@@ -230,12 +230,14 @@ local function build_token(envelope, runtime, key_info_mode)
 end
 
 
-local function add_reference(envelope, signed_info, target, algorithm)
+-- `inclusive_prefixes` is the InclusiveNamespaces PrefixList for the
+-- reference transform; it is empty when every declaration is used by a name.
+local function add_reference(envelope, signed_info, target, algorithm, inclusive_prefixes)
     local target_id = get_id(target)
     if not target_id then
         return nil, "signed element has no wsu:Id"
     end
-    local canonical, canonical_err = xml.canonicalize(target)
+    local canonical, canonical_err = xml.canonicalize(target, inclusive_prefixes)
     if not canonical then
         return nil, canonical_err
     end
@@ -249,6 +251,11 @@ local function add_reference(envelope, signed_info, target, algorithm)
     local transforms = xml.new_child(reference, envelope.ds_ns, "Transforms")
     local transform = xml.new_child(transforms, envelope.ds_ns, "Transform")
     xml.set_property(transform, "Algorithm", EXCLUSIVE_C14N)
+    if #inclusive_prefixes > 0 then
+        local ec_ns = xml.new_namespace(transform, EXCLUSIVE_C14N, "ec")
+        local inclusive = xml.new_child(transform, ec_ns, "InclusiveNamespaces")
+        xml.set_property(inclusive, "PrefixList", xml.prefix_list(inclusive_prefixes))
+    end
     local digest_method = xml.new_child(reference, envelope.ds_ns, "DigestMethod")
     xml.set_property(digest_method, "Algorithm", algorithm.digest_uri)
     xml.new_child(reference, envelope.ds_ns, "DigestValue", encode_base64(digest_value))
@@ -268,7 +275,8 @@ local function build_signature(envelope, runtime, token_id, targets, algorithm,
     xml.set_property(signature_method, "Algorithm", algorithm.signature_uri)
 
     for _, target in ipairs(targets) do
-        local ok, err = add_reference(envelope, signed_info, target, algorithm)
+        local ok, err = add_reference(envelope, signed_info, target.node, algorithm,
+                                      target.inclusive_prefixes)
         if not ok then
             return nil, err
         end
@@ -327,6 +335,8 @@ function _M.sign(body, conf, now)
         must_understand = conf.soap.must_understand
     end
     local ttl_seconds = conf.timestamp and conf.timestamp.ttl_seconds or 300
+    local allow_existing_content = conf.soap
+                                   and conf.soap.allow_existing_security_content == true
 
     local doc, parse_err = xml.parse(body)
     if not doc then
@@ -362,6 +372,11 @@ function _M.sign(body, conf, now)
         xml.free_document(doc)
         return nil, "invalid_soap", security_err
     end
+    if envelope.security and not allow_existing_content
+       and xml.has_content(envelope.security) then
+        xml.free_document(doc)
+        return nil, "invalid_soap", "wsse:Security header already has content"
+    end
     if envelope.security and xml.find_child(envelope.security, WSU, "Timestamp") then
         xml.free_document(doc)
         return nil, "invalid_soap", "wsse:Security already contains a wsu:Timestamp"
@@ -395,7 +410,14 @@ function _M.sign(body, conf, now)
     end
 
     local signature, signature_err = build_signature(
-        envelope, runtime, token_id, {envelope.body, timestamp}, algorithm,
+        envelope, runtime, token_id, {
+            -- declarations that no name in the Body uses, such as the prefix
+            -- in xsi:type="ns:Type", are signed through the PrefixList; the
+            -- Timestamp only contains generated content
+            {node = envelope.body,
+             inclusive_prefixes = xml.unused_namespace_prefixes(envelope.body)},
+            {node = timestamp, inclusive_prefixes = {}},
+        }, algorithm,
         key_info_mode)
     if not signature then
         xml.free_document(doc)

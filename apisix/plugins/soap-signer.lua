@@ -74,6 +74,13 @@ local schema = {
                     default = "auto",
                 },
                 must_understand = {type = "boolean", default = true},
+                -- A reused wsse:Security header must be empty unless this is
+                -- enabled: content that clients put into it, such as a
+                -- UsernameToken, is not covered by the signature.
+                allow_existing_security_content = {
+                    type = "boolean",
+                    default = false,
+                },
             },
         },
         timestamp = {
@@ -114,6 +121,13 @@ local schema = {
                     maximum = 67108864,
                     default = 5242880,
                 },
+                -- Sign only requests that an authentication Plugin attributed
+                -- to a Consumer, so that anonymous clients cannot obtain
+                -- signatures made with the configured key.
+                require_consumer = {
+                    type = "boolean",
+                    default = true,
+                },
             },
         },
     },
@@ -145,6 +159,7 @@ local function normalize_conf(original)
     conf.soap = conf.soap or {}
     set_default(conf.soap, "version", "auto")
     set_default(conf.soap, "must_understand", true)
+    set_default(conf.soap, "allow_existing_security_content", false)
     conf.timestamp = conf.timestamp or {}
     set_default(conf.timestamp, "ttl_seconds", 300)
     conf.request = conf.request or {}
@@ -152,6 +167,7 @@ local function normalize_conf(original)
     set_default(conf.request, "content_types",
                 {"text/xml", "application/soap+xml", "application/xml"})
     set_default(conf.request, "max_body_bytes", 5242880)
+    set_default(conf.request, "require_consumer", true)
     return conf
 end
 
