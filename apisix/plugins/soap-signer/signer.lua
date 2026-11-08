@@ -231,6 +231,10 @@ end
 
 
 local function add_reference(envelope, signed_info, target, algorithm)
+    local target_id = get_id(target)
+    if not target_id then
+        return nil, "signed element has no wsu:Id"
+    end
     local canonical, canonical_err = xml.canonicalize(target)
     if not canonical then
         return nil, canonical_err
@@ -241,7 +245,7 @@ local function add_reference(envelope, signed_info, target, algorithm)
     end
 
     local reference = xml.new_child(signed_info, envelope.ds_ns, "Reference")
-    xml.set_property(reference, "URI", "#" .. get_id(target))
+    xml.set_property(reference, "URI", "#" .. target_id)
     local transforms = xml.new_child(reference, envelope.ds_ns, "Transforms")
     local transform = xml.new_child(transforms, envelope.ds_ns, "Transform")
     xml.set_property(transform, "Algorithm", EXCLUSIVE_C14N)
@@ -315,6 +319,14 @@ function _M.sign(body, conf, now)
     if key_info_mode ~= "binary_security_token" and key_info_mode ~= "none" then
         return nil, "signing_error", "unsupported KeyInfo mode"
     end
+    -- The Plugin passes a normalized configuration; apply the same schema
+    -- defaults for direct callers instead of failing on a nil field.
+    local soap_version = conf.soap and conf.soap.version or "auto"
+    local must_understand = true
+    if conf.soap and conf.soap.must_understand ~= nil then
+        must_understand = conf.soap.must_understand
+    end
+    local ttl_seconds = conf.timestamp and conf.timestamp.ttl_seconds or 300
 
     local doc, parse_err = xml.parse(body)
     if not doc then
@@ -328,7 +340,7 @@ function _M.sign(body, conf, now)
     end
 
     local actual_version = envelope.soap_namespace == SOAP12 and "1.2" or "1.1"
-    if conf.soap.version ~= "auto" and conf.soap.version ~= actual_version then
+    if soap_version ~= "auto" and soap_version ~= actual_version then
         xml.free_document(doc)
         return nil, "not_soap", "SOAP version does not match configuration"
     end
@@ -363,7 +375,7 @@ function _M.sign(body, conf, now)
     end
 
     ensure_namespaces(envelope)
-    set_must_understand(envelope, conf.soap.must_understand)
+    set_must_understand(envelope, must_understand)
 
     local body_id, body_id_err = ensure_id(envelope.body, envelope.body_wsu_ns, "Body")
     if not body_id then
@@ -371,7 +383,7 @@ function _M.sign(body, conf, now)
         return nil, "signing_error", body_id_err
     end
     local timestamp, timestamp_err = build_timestamp(
-        envelope, conf.timestamp.ttl_seconds, now or ngx.time())
+        envelope, ttl_seconds, now or ngx.time())
     if not timestamp then
         xml.free_document(doc)
         return nil, "signing_error", timestamp_err

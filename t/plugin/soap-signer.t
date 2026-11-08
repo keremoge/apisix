@@ -766,3 +766,159 @@ true RSA private key must be at least 2048 bits
 true credential_error RSA private key must be at least 2048 bits
 rsa-sha1 1024-bit verified: true
 true RSA private key must be at least 2048 bits
+
+
+
+=== TEST 12: reject documents that make libxml2 parsing super-linear
+--- apisix_yaml
+routes: []
+#END
+--- config
+    location /t {
+        content_by_lua_block {
+            local signer = require("apisix.plugins.soap-signer.signer")
+
+            local function read(path)
+                local file = assert(io.open(path, "rb"))
+                local value = file:read("*a")
+                file:close()
+                return value
+            end
+
+            local conf = {
+                credentials = {
+                    certificate = read("t/certs/server.crt"),
+                    private_key = read("t/certs/server.key"),
+                },
+                soap = {version = "auto", must_understand = true},
+                timestamp = {ttl_seconds = 300},
+            }
+            local function envelope(attributes, body)
+                return '<s:Envelope xmlns:s="' .. signer.namespaces.soap11 .. '"'
+                       .. attributes .. '><s:Body>' .. (body or "") .. '</s:Body></s:Envelope>'
+            end
+            local function decoy_prefixes(n)
+                -- occupy ds, ds1, ds2, ... with other namespaces
+                local t = {' xmlns:ds="urn:decoy"'}
+                for i = 1, n - 1 do
+                    t[#t + 1] = string.format(' xmlns:ds%d="urn:decoy"', i)
+                end
+                return table.concat(t)
+            end
+            local function try(name, body)
+                ngx.update_time()
+                local started = ngx.now()
+                local signed, code, detail = signer.sign(body, conf, 1790856000)
+                ngx.update_time()
+                assert(ngx.now() - started < 2, name .. " took too long")
+                ngx.say(name, ": ", signed and "signed" or (code .. " " .. detail))
+            end
+
+            local attributes = {}
+            for i = 1, 257 do
+                attributes[i] = string.format(' a%d="v"', i)
+            end
+            try("256 attributes", envelope("", "<p" .. table.concat(attributes, "", 1, 256) .. "/>"))
+            try("257 attributes", envelope("", "<p" .. table.concat(attributes) .. "/>"))
+            -- the Envelope declares the SOAP namespace, so 127 decoys reach the limit
+            try("128 namespaces in scope", envelope(decoy_prefixes(127)))
+            try("129 namespaces in scope", envelope(decoy_prefixes(128)))
+            -- prefix collisions used to make namespace lookup quadratic
+            try("16000 colliding prefixes", envelope(decoy_prefixes(16000)))
+            try("5 MB of attributes on one element",
+                envelope("", "<p" .. string.rep(' a="v"', 870000) .. "/>"))
+        }
+    }
+--- request
+GET /t
+--- response_body
+256 attributes: signed
+257 attributes: invalid_soap an element has more than 256 attributes
+128 namespaces in scope: signed
+129 namespaces in scope: invalid_soap more than 128 namespace declarations are in scope
+16000 colliding prefixes: invalid_soap an element has more than 256 attributes
+5 MB of attributes on one element: invalid_soap an element has more than 256 attributes
+--- timeout: 30
+
+
+
+=== TEST 13: warn about a signing certificate outside its validity period
+--- apisix_yaml
+routes: []
+#END
+--- config
+    location /t {
+        content_by_lua_block {
+            local signer = require("apisix.plugins.soap-signer.signer")
+
+            local function read(path)
+                local file = assert(io.open(path, "rb"))
+                local value = file:read("*a")
+                file:close()
+                return value
+            end
+
+            -- t/certs/etcd.pem is an RSA certificate that expired in 2021
+            local signed = signer.sign(
+                '<s:Envelope xmlns:s="' .. signer.namespaces.soap11 .. '"><s:Body/></s:Envelope>',
+                {
+                    credentials = {
+                        certificate = read("t/certs/etcd.pem"),
+                        private_key = read("t/certs/etcd.key"),
+                    },
+                    soap = {version = "auto", must_understand = true},
+                    timestamp = {ttl_seconds = 300},
+                })
+            ngx.say(signed ~= nil)
+        }
+    }
+--- request
+GET /t
+--- response_body
+true
+--- error_log
+the signing certificate expired at 2021-10-28T03:33:02Z; verifiers will reject the signatures
+
+
+
+=== TEST 14: apply schema defaults when sign is called without optional sections
+--- apisix_yaml
+routes: []
+#END
+--- config
+    location /t {
+        content_by_lua_block {
+            local signer = require("apisix.plugins.soap-signer.signer")
+            local xml = require("apisix.plugins.soap-signer.xml")
+
+            local function read(path)
+                local file = assert(io.open(path, "rb"))
+                local value = file:read("*a")
+                file:close()
+                return value
+            end
+
+            local signed = assert(signer.sign(
+                '<s:Envelope xmlns:s="' .. signer.namespaces.soap11 .. '"><s:Body/></s:Envelope>',
+                {credentials = {
+                    certificate = read("t/certs/server.crt"),
+                    private_key = read("t/certs/server.key"),
+                }},
+                1790856000))
+            local ns = signer.namespaces
+            local doc = assert(xml.parse(signed))
+            local security = assert(xml.find_all(xml.root(doc), ns.wsse, "Security")[1])
+            local timestamp = assert(xml.find_child(security, ns.wsu, "Timestamp"))
+            ngx.say("mustUnderstand=", xml.get_namespaced_property(security, ns.soap11,
+                                                                  "mustUnderstand"))
+            ngx.say("Created=", xml.content(xml.find_child(timestamp, ns.wsu, "Created")))
+            ngx.say("Expires=", xml.content(xml.find_child(timestamp, ns.wsu, "Expires")))
+            xml.free_document(doc)
+        }
+    }
+--- request
+GET /t
+--- response_body
+mustUnderstand=1
+Created=2026-10-01T12:00:00Z
+Expires=2026-10-01T12:05:00Z

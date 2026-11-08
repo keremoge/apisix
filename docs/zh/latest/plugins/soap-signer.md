@@ -251,7 +251,7 @@ curl http://127.0.0.1:9080/signed-soap \
 | HTTP 状态码 | 消息 | 原因 |
 | --- | --- | --- |
 | `400` | `empty_body` | 被选中的请求没有请求体。 |
-| `400` | `invalid_soap` | XML 解析失败、Body 缺失或重复、Header 重复或位于 Body 之后、XML ID（`wsu:Id`、`xml:id` 和无命名空间的 `Id`）无效或重复、`wsse:Security` 标头已包含 `wsu:Timestamp`，或存在 DTD/实体声明。 |
+| `400` | `invalid_soap` | XML 解析失败、Body 缺失或重复、Header 重复或位于 Body 之后、XML ID（`wsu:Id`、`xml:id` 和无命名空间的 `Id`）无效或重复、`wsse:Security` 标头已包含 `wsu:Timestamp`、存在 DTD/实体声明，或消息超出[限制](#限制)中列出的解析器限制。 |
 | `400` | `not_soap` | 根元素不是受支持的 SOAP Envelope，或与 `soap.version` 不匹配。 |
 | `400` | `already_signed` | 消息已包含 `ds:Signature`。 |
 | `413` | `body_too_large` | 请求体超过生效的请求体大小限制（参见 `request.max_body_bytes`）。 |
@@ -267,6 +267,10 @@ curl http://127.0.0.1:9080/signed-soap \
 - KeyInfo 仅支持 X.509 BinarySecurityToken 直接引用或省略；不支持其他 KeyInfo 格式。
 - 不支持 Actor/Role 定向、thumbprint 引用、ECDSA、RSA-PSS 或替换已有签名。
 - 签名前会缓冲整个请求体；此操作不是流式签名。
+- 为了使解析时间保持线性，如果消息中某个元素的属性（包括命名空间声明）超过 256 个，或同时生效的命名空间声明超过 128 个，插件会拒绝该消息。实际消息远低于这些限制。
+- 被复用的 `wsse:Security` 标头中已有的内容（例如客户端提供的 `wsse:UsernameToken`）不受签名保护。服务不得将此类内容视为由 APISIX 担保。
+- Exclusive canonicalization 只覆盖元素名和属性名使用的命名空间声明。如果某个前缀只出现在文本或属性值中（例如 `xsi:type="ns:Type"` 中的 `ns`），而从未用于元素名或属性名，则该前缀不受签名保护：修改其绑定不会使签名失效。
+- 插件不会强制检查签名证书的有效期。当 APISIX 加载已过期或尚未生效的证书时会记录警告，因为验证方会拒绝此类签名。
 
 ## 故障排查
 

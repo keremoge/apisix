@@ -241,7 +241,7 @@ function _M.rewrite(plugin_name, conf, ctx, sign)
 
     ngx.req.set_body_data(signed)
     core.request.set_header(ctx, "Content-Length", tostring(#signed))
-    local var_cache = ctx.var and ctx.var._cache
+    local var_cache = ctx and ctx.var and ctx.var._cache
     if var_cache then
         var_cache.http_content_length = nil
     end

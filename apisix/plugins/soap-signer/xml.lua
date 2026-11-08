@@ -17,6 +17,10 @@
 local ffi = require("ffi")
 local jit = require("jit")
 
+local byte = string.byte
+local find = string.find
+local gmatch = string.gmatch
+local sub = string.sub
 local type = type
 
 
@@ -221,6 +225,23 @@ local XML_ID_NAMESPACE = "http://www.w3.org/XML/1998/namespace"
 local WSU_ID_NAMESPACE = "http://docs.oasis-open.org/wss/2004/01/"
                           .. "oasis-200401-wss-wssecurity-utility-1.0.xsd"
 
+local DTD_ERROR = "DTD and entity declarations are not allowed"
+
+-- libxml2 2.9 (the version in Debian bookworm based APISIX images) compares
+-- every attribute of an element with the ones before it and resolves every
+-- element and attribute name against all namespace declarations in scope.
+-- Many attributes on one element, or many namespace declarations in scope,
+-- therefore cost super-linear CPU time while the NGINX worker is blocked.
+-- Reject such documents before they reach the parser; real documents stay
+-- far below these limits.
+local MAX_ATTRIBUTES_PER_ELEMENT = 256
+local MAX_NAMESPACES_IN_SCOPE = 128
+-- The shortest possible attribute is 5 bytes (` a=""`), so only a markup
+-- segment longer than this can hold too many attributes.
+local MIN_SUSPICIOUS_SEGMENT = MAX_ATTRIBUTES_PER_ELEMENT * 5
+local ATTRIBUTE_PATTERN = "%s[^%s=<>\"']+%s*=%s*[\"']"
+local NAMESPACE_DECLARATION_PATTERN = "%sxmlns[%s:=]"
+
 local _M = {}
 
 
@@ -239,6 +260,165 @@ local function copy_and_free(value)
     local result = ffi.string(value)
     C.xmlFree(value)
     return result
+end
+
+
+local function count_plain(value, needle, first, last, limit)
+    local count = 0
+    local position = first
+    while count <= limit do
+        local found = find(value, needle, position, true)
+        if not found or found > last then
+            break
+        end
+        count = count + 1
+        position = found + 1
+    end
+    return count
+end
+
+
+-- Attribute values cannot contain "<", so every attribute of an element is
+-- inside the segment between its "<" and the next "<". Counting may include
+-- text that looks like attributes, which only makes the check stricter.
+local function has_too_many_attributes(value)
+    local start = find(value, "<", 1, true)
+    while start do
+        local next_start = find(value, "<", start + 1, true)
+        local stop = (next_start or #value + 1) - 1
+        if stop - start >= MIN_SUSPICIOUS_SEGMENT
+           and count_plain(value, "=", start, stop, MAX_ATTRIBUTES_PER_ELEMENT)
+               > MAX_ATTRIBUTES_PER_ELEMENT then
+            local count = 0
+            for _ in gmatch(sub(value, start, stop), ATTRIBUTE_PATTERN) do
+                count = count + 1
+                if count > MAX_ATTRIBUTES_PER_ELEMENT then
+                    return true
+                end
+            end
+        end
+        start = next_start
+    end
+    return false
+end
+
+
+local function count_namespace_declarations(chunk)
+    if not find(chunk, "xmlns", 1, true) then
+        return 0
+    end
+    local count = 0
+    for _ in gmatch(chunk, NAMESPACE_DECLARATION_PATTERN) do
+        count = count + 1
+    end
+    return count
+end
+
+
+-- Track the namespace declarations in scope while walking the markup.
+-- Quoted attribute values, comments, CDATA sections and processing
+-- instructions are skipped, so only real declarations are counted; markup
+-- that cannot be scanned is left to libxml2, which rejects it.
+local function has_too_many_namespaces_in_scope(value)
+    local declared = {}
+    local depth = 0
+    local in_scope = 0
+    local position = 1
+    while true do
+        local start = find(value, "<", position, true)
+        if not start then
+            return false
+        end
+        local next_char = byte(value, start + 1)
+        if next_char == 33 then                                    -- "<!"
+            if sub(value, start, start + 3) == "<!--" then
+                local close = find(value, "-->", start + 4, true)
+                if not close then
+                    return false
+                end
+                position = close + 3
+            elseif sub(value, start, start + 8) == "<![CDATA[" then
+                local close = find(value, "]]>", start + 9, true)
+                if not close then
+                    return false
+                end
+                position = close + 3
+            else
+                return false, DTD_ERROR
+            end
+        elseif next_char == 63 then                                -- "<?"
+            local close = find(value, "?>", start + 2, true)
+            if not close then
+                return false
+            end
+            position = close + 2
+        elseif next_char == 47 then                                -- "</"
+            local close = find(value, ">", start + 2, true)
+            if not close then
+                return false
+            end
+            if depth > 0 then
+                in_scope = in_scope - declared[depth]
+                declared[depth] = nil
+                depth = depth - 1
+            end
+            position = close + 1
+        else                                                       -- start tag
+            local declarations = 0
+            local cursor = start + 1
+            local tag_end
+            while true do
+                local stop = find(value, "[\"'>]", cursor)
+                if not stop then
+                    return false
+                end
+                declarations = declarations + count_namespace_declarations(
+                    sub(value, cursor - 1, stop - 1))
+                local stop_char = byte(value, stop)
+                if stop_char == 62 then                            -- ">"
+                    tag_end = stop
+                    break
+                end
+                local close_quote = find(value, stop_char == 34 and '"' or "'",
+                                         stop + 1, true)
+                if not close_quote then
+                    return false
+                end
+                cursor = close_quote + 1
+            end
+            if in_scope + declarations > MAX_NAMESPACES_IN_SCOPE then
+                return true
+            end
+            if byte(value, tag_end - 1) ~= 47 then                -- not "/>"
+                depth = depth + 1
+                declared[depth] = declarations
+                in_scope = in_scope + declarations
+            end
+            position = tag_end + 1
+        end
+    end
+end
+
+
+-- Returns an error message if the document exceeds the parser limits.
+local function check_parser_limits(value)
+    if has_too_many_attributes(value) then
+        return "an element has more than " .. MAX_ATTRIBUTES_PER_ELEMENT
+               .. " attributes"
+    end
+    -- Without enough declarations in the whole document, none can be
+    -- exceeded in scope; this keeps the common case cheap.
+    if count_plain(value, "xmlns", 1, #value, MAX_NAMESPACES_IN_SCOPE)
+       > MAX_NAMESPACES_IN_SCOPE then
+        local exceeded, err = has_too_many_namespaces_in_scope(value)
+        if err then
+            return err
+        end
+        if exceeded then
+            return "more than " .. MAX_NAMESPACES_IN_SCOPE
+                   .. " namespace declarations are in scope"
+        end
+    end
 end
 
 
@@ -272,6 +452,10 @@ function _M.parse(value)
     if type(value) ~= "string" or value == "" then
         return nil, "XML body is empty"
     end
+    local limit_err = check_parser_limits(value)
+    if limit_err then
+        return nil, limit_err
+    end
 
     local ctxt = C.xmlNewParserCtxt()
     if ctxt == nil then
@@ -291,7 +475,7 @@ function _M.parse(value)
     while child ~= nil do
         if child.type == XML_DTD_NODE then
             C.xmlFreeDoc(doc)
-            return nil, "DTD and entity declarations are not allowed"
+            return nil, DTD_ERROR
         end
         child = child.next
     end

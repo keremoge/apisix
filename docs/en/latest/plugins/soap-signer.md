@@ -349,7 +349,7 @@ unchanged.
 | HTTP status | Message | Cause |
 | --- | --- | --- |
 | `400` | `empty_body` | The selected request has no body. |
-| `400` | `invalid_soap` | XML parsing failed, Body is absent or duplicated, Header is duplicated or follows the Body, recognized XML ID values (`wsu:Id`, `xml:id`, and unqualified `Id`) are invalid or duplicated, the `wsse:Security` header already contains a `wsu:Timestamp`, or a DTD/entity declaration is present. |
+| `400` | `invalid_soap` | XML parsing failed, Body is absent or duplicated, Header is duplicated or follows the Body, recognized XML ID values (`wsu:Id`, `xml:id`, and unqualified `Id`) are invalid or duplicated, the `wsse:Security` header already contains a `wsu:Timestamp`, a DTD/entity declaration is present, or the message exceeds the parser limits listed under [Limitations](#limitations). |
 | `400` | `not_soap` | The root is not a supported SOAP Envelope or does not match `soap.version`. |
 | `400` | `already_signed` | The message already contains a `ds:Signature`. |
 | `413` | `body_too_large` | The body exceeds the effective body size limit (see `request.max_body_bytes`). |
@@ -369,6 +369,21 @@ The Plugin does not return detailed cryptographic or request content to clients.
   existing signatures are not supported.
 - The complete request body is buffered before signing; signing is not a
   streaming operation.
+- To keep parsing time linear, the Plugin rejects a message in which one
+  element has more than 256 attributes (namespace declarations included) or
+  more than 128 namespace declarations are in scope at once. Real messages
+  stay far below these limits.
+- Content that a reused `wsse:Security` header already contains, such as a
+  client-supplied `wsse:UsernameToken`, is not covered by the signature.
+  Services must not treat such content as vouched for by APISIX.
+- Exclusive canonicalization only covers namespace declarations that element
+  and attribute names use. A prefix that is used only inside text or
+  attribute values, such as `ns` in `xsi:type="ns:Type"`, and never in an
+  element or attribute name, is not protected by the signature: its binding
+  can change without invalidating it.
+- The signing certificate's validity period is not enforced. APISIX logs a
+  warning when it loads a certificate that has expired or is not yet valid,
+  because verifiers reject such signatures.
 
 ## Troubleshooting
 
