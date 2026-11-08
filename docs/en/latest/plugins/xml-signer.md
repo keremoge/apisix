@@ -325,7 +325,7 @@ through unchanged.
 | HTTP status | Message | Cause |
 | --- | --- | --- |
 | `400` | `empty_body` | The selected request has no body. |
-| `400` | `invalid_xml` | XML parsing failed, the document has no root, or a DTD/entity declaration is present. |
+| `400` | `invalid_xml` | XML parsing failed, the document is not namespace well-formed (for example, it uses an undeclared prefix), the document has no root, a DTD/entity declaration is present, or the document exceeds the parser limits listed under [Limitations](#limitations). |
 | `400` | `already_signed` | The document already contains a `ds:Signature`. |
 | `413` | `body_too_large` | The body exceeds the effective body size limit (see `request.max_body_bytes`). |
 | `415` | `unsupported_media_type` | Content-Type is missing, repeated, not listed in `request.content_types`, or declares a non-UTF-8 charset; or Content-Encoding is repeated or is not `identity`. |
@@ -344,6 +344,18 @@ The Plugin does not return detailed cryptographic or request content to clients.
   already signed document are not supported.
 - The complete request body is buffered in memory or a temporary request-body
   file before signing; this is not a streaming transform.
+- To keep parsing time linear, the Plugin rejects a document in which one
+  element has more than 256 attributes (namespace declarations included) or
+  more than 128 namespace declarations are in scope at once. Real documents
+  stay far below these limits.
+- Exclusive canonicalization only covers namespace declarations that element
+  and attribute names use. A prefix that is used only inside text or
+  attribute values, such as `ns` in `xsi:type="ns:Type"`, and never in an
+  element or attribute name, is not protected by the signature: its binding
+  can change without invalidating it.
+- The signing certificate's validity period is not enforced. APISIX logs a
+  warning when it loads a certificate that has expired or is not yet valid,
+  because verifiers reject such signatures.
 
 ## Troubleshooting
 

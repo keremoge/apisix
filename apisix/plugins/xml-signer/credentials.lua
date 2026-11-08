@@ -20,6 +20,8 @@ local resty_sha256 = require("resty.sha256")
 local resty_string = require("resty.string")
 local x509 = require("resty.openssl.x509")
 
+local ngx_time = ngx.time
+local os_date = os.date
 local tostring = tostring
 local type = type
 
@@ -34,6 +36,28 @@ local credential_cache = core.lrucache.new({
 })
 
 local _M = {}
+
+
+local function format_time(timestamp)
+    return os_date("!%Y-%m-%dT%H:%M:%SZ", timestamp)
+end
+
+
+-- Verifiers reject signatures made with a certificate outside its validity
+-- period. Signing still proceeds, so a configuration change cannot break
+-- traffic, but the operator is warned whenever the credentials are loaded.
+local function warn_if_outside_validity(certificate)
+    local now = ngx_time()
+    local not_before = certificate:get_not_before()
+    local not_after = certificate:get_not_after()
+    if not_after and not_after < now then
+        core.log.warn("the signing certificate expired at ", format_time(not_after),
+                      "; verifiers will reject the signatures")
+    elseif not_before and not_before > now then
+        core.log.warn("the signing certificate is not valid before ",
+                      format_time(not_before), "; verifiers will reject the signatures")
+    end
+end
 
 
 local function fingerprint(certificate_pem, private_key_pem)
@@ -73,6 +97,7 @@ local function parse_credentials(certificate_pem, private_key_pem)
     if not matches then
         return nil, "private key does not match certificate: " .. tostring(match_err)
     end
+    warn_if_outside_validity(certificate)
 
     local certificate_der, der_err = certificate:tostring("DER")
     if not certificate_der then

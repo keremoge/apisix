@@ -477,3 +477,176 @@ true credential_error RSA private key must be at least 2048 bits
 rsa-sha1 1024-bit verified: true
 true RSA private key must be at least 2048 bits
 true RSA private key must be at least 4096 bits
+
+
+
+=== TEST 9: reject XML that is not namespace well-formed
+--- apisix_yaml
+routes: []
+#END
+--- config
+    location /t {
+        content_by_lua_block {
+            local signer = require("apisix.plugins.xml-signer.signer")
+
+            local function read(path)
+                local file = assert(io.open(path, "rb"))
+                local value = file:read("*a")
+                file:close()
+                return value
+            end
+
+            local conf = {credentials = {
+                certificate = read("t/certs/server.crt"),
+                private_key = read("t/certs/server.key"),
+            }}
+            for _, body in ipairs({
+                '<r><a:x/></r>',
+                '<r a:b="1"/>',
+                '<r xmlns:a="urn:u" xmlns:b="urn:u" a:x="1" b:x="2"/>',
+                '<r xmlns:a="not a uri"><a:x/></r>',
+            }) do
+                local signed, code, detail = signer.sign(body, conf)
+                ngx.say(signed == nil, " ", code, " ", detail)
+            end
+            ngx.say(signer.sign('<a:r xmlns:a="urn:u"><a:x a:y="1"/></a:r>', conf) ~= nil)
+        }
+    }
+--- request
+GET /t
+--- response_body
+true invalid_xml failed to parse XML
+true invalid_xml failed to parse XML
+true invalid_xml failed to parse XML
+true invalid_xml failed to parse XML
+true
+
+
+
+=== TEST 10: reject documents that make libxml2 parsing super-linear
+--- apisix_yaml
+routes: []
+#END
+--- config
+    location /t {
+        content_by_lua_block {
+            local signer = require("apisix.plugins.xml-signer.signer")
+
+            local function read(path)
+                local file = assert(io.open(path, "rb"))
+                local value = file:read("*a")
+                file:close()
+                return value
+            end
+
+            local conf = {credentials = {
+                certificate = read("t/certs/server.crt"),
+                private_key = read("t/certs/server.key"),
+            }}
+            local function attributes(n)
+                local t = {}
+                for i = 1, n do
+                    t[i] = string.format(' a%d="v"', i)
+                end
+                return table.concat(t)
+            end
+            local function nested(levels)
+                local open, close = {}, {}
+                for i = 1, levels do
+                    open[i] = string.format('<e xmlns:n%d="urn:n">', i)
+                    close[i] = "</e>"
+                end
+                return '<r xmlns:p="urn:p">' .. table.concat(open) .. "<p:a/>"
+                       .. table.concat(close) .. "</r>"
+            end
+            local function try(name, body)
+                ngx.update_time()
+                local started = ngx.now()
+                local signed, code, detail = signer.sign(body, conf)
+                ngx.update_time()
+                assert(ngx.now() - started < 2, name .. " took too long")
+                ngx.say(name, ": ", signed and "signed" or (code .. " " .. detail))
+            end
+
+            try("256 attributes", "<r" .. attributes(256) .. "/>")
+            try("257 attributes", "<r" .. attributes(257) .. "/>")
+            -- the root declares one namespace, each nested level one more
+            try("128 namespaces in scope", nested(127))
+            try("129 namespaces in scope", nested(128))
+            -- declarations in comments, CDATA, processing instructions and
+            -- attribute values are not namespace declarations
+            local decoys = string.rep('<!-- xmlns:c="u" --><![CDATA[ xmlns:d="u" ]]>'
+                                      .. '<?pi xmlns:e="u"?><x v=" xmlns:f=&quot;u&quot; >"/>',
+                                      200)
+            try("decoys are not counted", '<r xmlns:p="urn:p">' .. decoys .. "</r>")
+            -- sibling elements that redeclare a namespace have one in scope
+            try("2000 sibling declarations",
+                "<r>" .. string.rep('<a xmlns="urn:x">1</a>', 2000) .. "</r>")
+            try("DTD with many declarations",
+                '<!DOCTYPE r [<!ENTITY a "b">]><r' .. string.rep(' xmlns:a="u"', 200) .. "/>")
+
+            -- 5 MB attack documents are rejected before they reach libxml2
+            local limit = 5242880
+            try("5 MB of attributes on one element",
+                "<r" .. attributes(math.floor((limit - 10) / 9)) .. "/>")
+            local open, close = {}, {}
+            for i = 1, 64 do
+                local t = {"<e"}
+                for j = 1, 64 do
+                    t[#t + 1] = string.format(' xmlns:n%d_%d="u"', i, j)
+                end
+                open[i] = table.concat(t) .. ">"
+                close[i] = "</e>"
+            end
+            local head = '<r xmlns:p="urn:p">' .. table.concat(open)
+            local tail = table.concat(close) .. "</r>"
+            try("5 MB with 4096 namespaces in scope",
+                head .. string.rep("<p:a/>", math.floor((limit - #head - #tail) / 6)) .. tail)
+        }
+    }
+--- request
+GET /t
+--- response_body
+256 attributes: signed
+257 attributes: invalid_xml an element has more than 256 attributes
+128 namespaces in scope: signed
+129 namespaces in scope: invalid_xml more than 128 namespace declarations are in scope
+decoys are not counted: signed
+2000 sibling declarations: signed
+DTD with many declarations: invalid_xml DTD and entity declarations are not allowed
+5 MB of attributes on one element: invalid_xml an element has more than 256 attributes
+5 MB with 4096 namespaces in scope: invalid_xml more than 128 namespace declarations are in scope
+--- timeout: 30
+
+
+
+=== TEST 11: warn about a signing certificate outside its validity period
+--- apisix_yaml
+routes: []
+#END
+--- config
+    location /t {
+        content_by_lua_block {
+            local signer = require("apisix.plugins.xml-signer.signer")
+
+            local function read(path)
+                local file = assert(io.open(path, "rb"))
+                local value = file:read("*a")
+                file:close()
+                return value
+            end
+
+            -- t/certs/etcd.pem is an RSA certificate that expired in 2021
+            local signed = signer.sign("<r/>", {credentials = {
+                certificate = read("t/certs/etcd.pem"),
+                private_key = read("t/certs/etcd.key"),
+            }})
+            ngx.say(signed ~= nil)
+        }
+    }
+--- request
+GET /t
+--- response_body
+true
+--- error_log
+the signing certificate expired at 2021-10-28T03:33:02Z; verifiers will reject the signatures
