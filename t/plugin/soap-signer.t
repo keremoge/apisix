@@ -1375,3 +1375,102 @@ GET /t
 Transform elements in the XML-DSig namespace: 2
 InclusiveNamespaces in the exc-c14n namespace: 1
 signature verified: true
+
+
+
+=== TEST 21: review regressions: rebinding a prefix on the element that refers to it, and UTF-16 namespace declarations
+--- apisix_yaml
+routes: []
+#END
+--- config
+    location /t {
+        content_by_lua_block {
+            local digest = require("resty.openssl.digest")
+            local signer = require("apisix.plugins.soap-signer.signer")
+            local xml = require("apisix.plugins.soap-signer.xml")
+            local ns = signer.namespaces
+            local exclusive = "http://www.w3.org/2001/10/xml-exc-c14n#"
+
+            local function read(path)
+                local file = assert(io.open(path, "rb"))
+                local value = file:read("*a")
+                file:close()
+                return value
+            end
+
+            local conf = {
+                credentials = {
+                    certificate = read("t/certs/server.crt"),
+                    private_key = read("t/certs/server.key"),
+                },
+                soap = {version = "auto", must_understand = true},
+                timestamp = {ttl_seconds = 300},
+            }
+            local function sha256(value)
+                local context = assert(digest.new("sha256"))
+                assert(context:update(value))
+                return ngx.encode_base64(assert(context:final()))
+            end
+
+            -- "p" is declared on the Body, used by <p:Marker/>, and referred
+            -- to by a sibling's xsi:type
+            local signed = assert(signer.sign(
+                '<s:Envelope xmlns:s="' .. ns.soap11 .. '"'
+                .. ' xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
+                .. '<s:Body xmlns:p="urn:a"><Item xsi:type="p:Type"/><p:Marker/></s:Body>'
+                .. '</s:Envelope>', conf, 1790856000))
+            local function body_reference(doc)
+                local root = assert(xml.root(doc))
+                local body = assert(xml.find_child(root, ns.soap11, "Body"))
+                local uri = "#" .. xml.get_namespaced_property(body, ns.wsu, "Id")
+                for _, reference in ipairs(xml.find_all(root, ns.ds, "Reference")) do
+                    if xml.get_property(reference, "URI") == uri then
+                        return body, reference
+                    end
+                end
+            end
+            local doc = assert(xml.parse(signed))
+            local _, reference = body_reference(doc)
+            local inclusive = assert(xml.find_all(reference, exclusive, "InclusiveNamespaces")[1])
+            local prefix_list = xml.get_property(inclusive, "PrefixList")
+            local expected = xml.content(assert(xml.find_child(reference, ns.ds, "DigestValue")))
+            xml.free_document(doc)
+            ngx.say("PrefixList=", prefix_list)
+
+            -- rebind "p" on <Item> only, which changes the meaning of its type
+            local tampered = signed:gsub("<Item ", '<Item xmlns:p="urn:other" ')
+            doc = assert(xml.parse(tampered))
+            local body = body_reference(doc)
+            local matches = sha256(assert(xml.canonicalize(body, {prefix_list}))) == expected
+            xml.free_document(doc)
+            ngx.say("rebinding on the referring element detected: ", not matches)
+
+            -- UTF-16 hides namespace declarations from the byte-based check
+            local open, close = {}, {}
+            for level = 1, 16 do
+                local declarations = {}
+                for i = 1, 64 do
+                    declarations[i] = string.format(' xmlns:n%d_%d="u"', level, i)
+                end
+                open[level] = "<e" .. table.concat(declarations) .. ">"
+                close[level] = "</e>"
+            end
+            local message = '<s:Envelope xmlns:s="' .. ns.soap11 .. '"><s:Body>'
+                            .. table.concat(open) .. string.rep("<a/>", 20000)
+                            .. table.concat(close) .. "</s:Body></s:Envelope>"
+            ngx.update_time()
+            local started = ngx.now()
+            local _, code, detail = signer.sign("\255\254" .. message:gsub(".", "%0\0"),
+                                                conf, 1790856000)
+            ngx.update_time()
+            assert(ngx.now() - started < 2)
+            ngx.say("UTF-16 with 1024 namespaces in scope: ", code, " ", detail)
+        }
+    }
+--- request
+GET /t
+--- response_body
+PrefixList=p
+rebinding on the referring element detected: true
+UTF-16 with 1024 namespaces in scope: invalid_soap only UTF-8 encoded XML is supported
+--- timeout: 30
