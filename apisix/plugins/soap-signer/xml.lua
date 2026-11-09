@@ -269,12 +269,17 @@ local function copy_and_free(value)
 end
 
 
+-- Count occurrences of `needle` in value[first..last], stopping after
+-- `limit`. The search runs on the segment only: searching `value` from
+-- `first` would scan to the end of the document whenever the segment has no
+-- match, which makes the caller quadratic.
 local function count_plain(value, needle, first, last, limit)
     local count = 0
-    local position = first
+    local segment = sub(value, first, last)
+    local position = 1
     while count <= limit do
-        local found = find(value, needle, position, true)
-        if not found or found > last then
+        local found = find(segment, needle, position, true)
+        if not found then
             break
         end
         count = count + 1
