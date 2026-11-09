@@ -994,3 +994,84 @@ GET /t
 Transform elements in the XML-DSig namespace: 2
 InclusiveNamespaces in the exc-c14n namespace: 1
 signature verified: true
+
+
+
+=== TEST 17: review regressions: rebinding a prefix on the element that refers to it, and UTF-16 namespace declarations
+--- apisix_yaml
+routes: []
+#END
+--- config
+    location /t {
+        content_by_lua_block {
+            local digest = require("resty.openssl.digest")
+            local signer = require("apisix.plugins.xml-signer.signer")
+            local xml = require("apisix.plugins.xml-signer.xml")
+            local ds = signer.namespaces.ds
+            local exclusive = "http://www.w3.org/2001/10/xml-exc-c14n#"
+
+            local function read(path)
+                local file = assert(io.open(path, "rb"))
+                local value = file:read("*a")
+                file:close()
+                return value
+            end
+
+            local conf = {credentials = {
+                certificate = read("t/certs/server.crt"),
+                private_key = read("t/certs/server.key"),
+            }}
+            local function sha256(value)
+                local context = assert(digest.new("sha256"))
+                assert(context:update(value))
+                return ngx.encode_base64(assert(context:final()))
+            end
+
+            -- "p" is used by an element name (<p:marker/>) and by a sibling's
+            -- xsi:type value
+            local signed = assert(signer.sign(
+                '<r xmlns:p="urn:a" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
+                .. '<item xsi:type="p:T"/><p:marker/></r>', conf))
+            local doc = assert(xml.parse(signed))
+            local signature = assert(xml.find_all(xml.root(doc), ds, "Signature")[1])
+            local inclusive = assert(xml.find_all(signature, exclusive, "InclusiveNamespaces")[1])
+            local prefix_list = xml.get_property(inclusive, "PrefixList")
+            local expected = xml.content(assert(xml.find_all(signature, ds, "DigestValue")[1]))
+            xml.free_document(doc)
+            ngx.say("PrefixList=", prefix_list)
+
+            -- rebind "p" on <item> only, which changes the meaning of its type
+            local tampered = signed:gsub("<item ", '<item xmlns:p="urn:b" ')
+            doc = assert(xml.parse(tampered))
+            xml.remove(assert(xml.find_all(xml.root(doc), ds, "Signature")[1]))
+            local matches = sha256(assert(xml.canonicalize_document(doc, {prefix_list}))) == expected
+            xml.free_document(doc)
+            ngx.say("rebinding on the referring element detected: ", not matches)
+
+            -- UTF-16 hides namespace declarations from the byte-based check
+            local open, close = {}, {}
+            for level = 1, 16 do
+                local declarations = {}
+                for i = 1, 64 do
+                    declarations[i] = string.format(' xmlns:n%d_%d="u"', level, i)
+                end
+                open[level] = "<e" .. table.concat(declarations) .. ">"
+                close[level] = "</e>"
+            end
+            local body = "<r>" .. table.concat(open) .. string.rep("<a/>", 20000)
+                         .. table.concat(close) .. "</r>"
+            ngx.update_time()
+            local started = ngx.now()
+            local _, code, detail = signer.sign("\255\254" .. body:gsub(".", "%0\0"), conf)
+            ngx.update_time()
+            assert(ngx.now() - started < 2)
+            ngx.say("UTF-16 with 1024 namespaces in scope: ", code, " ", detail)
+        }
+    }
+--- request
+GET /t
+--- response_body
+PrefixList=p
+rebinding on the referring element detected: true
+UTF-16 with 1024 namespaces in scope: invalid_xml only UTF-8 encoded XML is supported
+--- timeout: 30
