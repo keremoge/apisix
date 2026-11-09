@@ -731,3 +731,35 @@ PrefixList=ns signature=true
 digest matches: true
 rebound digest matches: false
 PrefixList=nil signature=true
+
+
+
+=== TEST 13: keep the attribute pre-check linear for long text without "="
+--- apisix_yaml
+routes: []
+#END
+--- config
+    location /t {
+        content_by_lua_block {
+            local xml = require("apisix.plugins.xml-signer.xml")
+            -- 32 MB of ~1.4 KB paragraphs without "=": every paragraph is a
+            -- segment long enough to be checked, and searching past the
+            -- segment made the check quadratic (about 15 s here)
+            local paragraph = "<p>" .. string.rep("lorem ipsum ", 120) .. "</p>"
+            local body = "<r>" .. string.rep(paragraph, 23000) .. "</r>"
+            ngx.update_time()
+            local started = ngx.now()
+            local doc, err = xml.parse(body)
+            ngx.update_time()
+            local elapsed = ngx.now() - started
+            assert(doc, err)
+            xml.free_document(doc)
+            assert(elapsed < 2, "parsing took " .. elapsed .. " s")
+            ngx.say("parsed ", math.floor(#body / 1048576), " MB")
+        }
+    }
+--- request
+GET /t
+--- response_body
+parsed 31 MB
+--- timeout: 60
